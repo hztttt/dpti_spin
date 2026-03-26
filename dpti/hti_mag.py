@@ -512,22 +512,23 @@ def _gen_lammps_input(
     ret += f"timestep        {timestep}\n"
     ret += "thermo          ${THERMO_FREQ}\n"
     ret += "compute         allmsd all msd\n"
+    ret += "compute         spinmsd all msd/spin\n"
     if 1 - lamb != 0:
         if not isinstance(m_spring_k, list):
             if switch == "three-step":
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_diff[1] f_l_spring_spin c_allmsd[*]\n"
+                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_diff[1] f_l_spring_spin c_allmsd[*] c_spinmsd[*]\n"
             else:
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_deep f_l_spring_spin c_allmsd[*]\n"
+                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_deep f_l_spring_spin c_allmsd[*] c_spinmsd[*]\n"
         else:
             if switch == "three-step":
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_diff[1] v_l_spring_spin c_allmsd[*]\n"
+                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_diff[1] v_l_spring_spin c_allmsd[*] c_spinmsd[*]\n"
             else:
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_deep v_l_spring_spin c_allmsd[*]\n"
+                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_deep v_l_spring_spin c_allmsd[*] c_spinmsd[*]\n"
     else:
         if switch == "three-step":
-            ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_diff[1] c_e_diff[1] c_allmsd[*]\n"
+            ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_diff[1] c_e_diff[1] c_allmsd[*] c_spinmsd[*]\n"
         else:
-            ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_deep c_e_deep c_allmsd[*]\n"
+            ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_deep c_e_deep c_allmsd[*] c_spinmsd[*]\n"
     ret += "thermo_modify   format 9 %.16e\n"
     ret += "thermo_modify   format 10 %.16e\n"
     ret += "thermo_modify   format 11 %.16e\n"
@@ -1058,6 +1059,7 @@ def _post_tasks(
     all_etot_err = []
     all_enthalpy = []
     all_msd_xyz = []
+    all_msd_spin = []
 
     for ii in all_tasks:
         log_name = os.path.join(ii, "log.lammps")
@@ -1068,7 +1070,8 @@ def _post_tasks(
         spa, spe = block_avg(data[:, 10], skip=stat_skip, block_size=stat_bsize)
         etot, etot_err = block_avg(data[:, 3], skip=stat_skip, block_size=stat_bsize)
         enthalpy, _ = block_avg(data[:, 4], skip=stat_skip, block_size=stat_bsize)
-        msd_xyz = data[-1, -1]
+        msd_xyz = data[-1, -5]   # c_allmsd[4]
+        msd_spin = data[-1, -1]  # c_spinmsd[4]
         sa /= natoms
         se /= natoms
         spa /= natoms
@@ -1089,6 +1092,7 @@ def _post_tasks(
         all_etot_err.append(etot_err)
         all_enthalpy.append(enthalpy)
         all_msd_xyz.append(msd_xyz)
+        all_msd_spin.append(msd_spin)
 
     all_lambda = np.array(all_lambda)
     all_es = np.array(all_es)
@@ -1166,12 +1170,13 @@ def _post_tasks(
     all_print.append(all_es)
     all_print.append(all_enthalpy)
     all_print.append(all_msd_xyz)
+    all_print.append(np.array(all_msd_spin))
     all_print = np.array(all_print)
     np.savetxt(
         os.path.join(iter_name, "hti.out"),
         all_print.T,
         fmt="%.8e",
-        header="lmbda dU dU_err Ud Us Usp Ud_err Us_err Usp_err etot spring_eng enthalpy msd_xyz",
+        header="lmbda dU dU_err Ud Us Usp Ud_err Us_err Usp_err etot spring_eng enthalpy msd_xyz msd_spin",
     )
 
     diff_e, err, sys_err = integrate_range_hti(all_lambda, de, all_err, scheme=scheme)

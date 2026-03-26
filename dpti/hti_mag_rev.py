@@ -200,7 +200,8 @@ def _gen_lammps_input_rev(
     ret += f"timestep        {timestep}\n"
     ret += "thermo          ${THERMO_FREQ}\n"
     ret += "compute         allmsd all msd\n"
-    ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_deep v_l_spring_spin c_allmsd[*]\n"
+    ret += "compute         spinmsd all msd/spin\n"
+    ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_deep v_l_spring_spin c_allmsd[*] c_spinmsd[*]\n"
     ret += "thermo_modify   format 9 %.16e\n"
     ret += "thermo_modify   format 10 %.16e\n"
     ret += "thermo_modify   format 11 %.16e\n"
@@ -415,7 +416,7 @@ def _post_tasks_rev(iter_name, jdata, natoms=None, scheme="s", step="spin_spring
 
     all_lambda, all_es, all_esp, all_ed = [], [], [], []
     all_es_err, all_esp_err, all_ed_err = [], [], []
-    all_etot, all_enthalpy, all_msd_xyz = [], [], []
+    all_etot, all_enthalpy, all_msd_xyz, all_msd_spin = [], [], [], []
 
     for ii in all_tasks:
         log_file = os.path.join(ii, "log.lammps")
@@ -426,7 +427,8 @@ def _post_tasks_rev(iter_name, jdata, natoms=None, scheme="s", step="spin_spring
         spa, spe = block_avg(data[:, 10], skip=stat_skip, block_size=stat_bsize)
         etot, _  = block_avg(data[:, 3],  skip=stat_skip, block_size=stat_bsize)
         enthalpy, _ = block_avg(data[:, 4], skip=stat_skip, block_size=stat_bsize)
-        msd_xyz  = data[-1, -1]
+        msd_xyz  = data[-1, -5]  # c_allmsd[4]
+        msd_spin = data[-1, -1]  # c_spinmsd[4]
 
         sa  /= natoms
         se  /= natoms
@@ -445,6 +447,7 @@ def _post_tasks_rev(iter_name, jdata, natoms=None, scheme="s", step="spin_spring
         all_etot.append(etot / natoms)
         all_enthalpy.append(enthalpy)
         all_msd_xyz.append(msd_xyz)
+        all_msd_spin.append(msd_spin)
 
     all_lambda  = np.array(all_lambda)
     all_es      = np.array(all_es)
@@ -475,13 +478,13 @@ def _post_tasks_rev(iter_name, jdata, natoms=None, scheme="s", step="spin_spring
         all_lambda, de_int, all_err,
         all_ed, all_es, all_esp,
         all_ed_err, all_es_err, all_esp_err,
-        all_etot, all_es, all_enthalpy, all_msd_xyz,
+        all_etot, all_es, all_enthalpy, all_msd_xyz, np.array(all_msd_spin),
     ])
     np.savetxt(
         os.path.join(iter_name, "hti.out"),
         all_print.T,
         fmt="%.8e",
-        header="lmbda dU dU_err Ud Us Usp Ud_err Us_err Usp_err etot spring_eng enthalpy msd_xyz",
+        header="lmbda dU dU_err Ud Us Usp Ud_err Us_err Usp_err etot spring_eng enthalpy msd_xyz msd_spin",
     )
 
     diff_e, err, sys_err = integrate_range_hti(all_lambda, de_int, all_err, scheme=scheme)

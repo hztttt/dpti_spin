@@ -127,7 +127,10 @@ def gen_equi_thermo_settings(timestep, is_spin=False):
     ret += "compute         allmsd all msd\n"
     if is_spin:
         ret += "compute         spin all property/atom sp spx spy spz fmx fmy fmz\n"
-    ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol lx ly lz xy xz yz pxx pyy pzz pxy pxz pyz c_allmsd[*]\n"
+        ret += "compute         spinmsd all msd/spin\n"
+        ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol lx ly lz xy xz yz pxx pyy pzz pxy pxz pyz c_allmsd[*] c_spinmsd[*]\n"
+    else:
+        ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol lx ly lz xy xz yz pxx pyy pzz pxy pxz pyz c_allmsd[*]\n"
     return ret
 
 
