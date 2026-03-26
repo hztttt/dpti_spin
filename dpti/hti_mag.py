@@ -12,8 +12,8 @@ import scipy.constants as pc
 # sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../'))
 from dpdispatcher import Machine, Resources, Submission, Task
 
-from dpti.einstein import free_energy, frenkel
-from dpti.lib.lammps import get_natoms, get_thermo
+from dpti.einstein import free_energy, frenkel, magnetic_frenkel
+from dpti.lib.lammps import get_natoms, get_thermo, get_nspins
 
 # from lib.utils import integrate_sys_err
 from dpti.lib.utils import (
@@ -30,6 +30,29 @@ from dpti.lib.utils import (
 
 def make_iter_name(iter_index):
     return "task_hti." + ("%04d" % iter_index)
+
+
+def _get_spring_lambda_mode(jdata):
+    spring_lambda_mode = jdata.get("spring_lambda_mode", "joint")
+    aliases = {
+        "same": "joint",
+        "together": "joint",
+        "joint": "joint",
+        "separate": "split",
+        "split": "split",
+        "lattice_only": "lattice_only",
+        "lattice-only": "lattice_only",
+        "spin_only": "spin_only",
+        "spin-only": "spin_only",
+    }
+    if spring_lambda_mode not in aliases:
+        raise RuntimeError(
+            "unknown spring_lambda_mode '{}', expected one of: {}".format(
+                spring_lambda_mode,
+                ", ".join(sorted(set(aliases.keys()))),
+            )
+        )
+    return aliases[spring_lambda_mode]
 
 
 def _ff_lj_on(lamb, model, sparam):
@@ -238,8 +261,11 @@ def _ff_lj_off(lamb, model, sparam, if_meam=False, meam_model=None, append=None)
 #     return ret
 
 
-def _ff_spring(lamb, m_spring_k, var_spring):
+def _ff_spring(lamb, m_spring_k, var_spring, enabled=True):
     ret = ""
+    if not enabled:
+        ret += "variable        l_spring equal 0.0\n"
+        return ret
     ntypes = len(m_spring_k)
     for ii in range(ntypes):
         ret += f"group           type_{ii + 1} type {ii + 1}\n"
@@ -256,6 +282,26 @@ def _ff_spring(lamb, m_spring_k, var_spring):
     ret += f"variable        l_spring equal {sum_str}\n"
     return ret
 
+def _ff_spring_spin(lamb, m_spring_spin_k, var_spring, enabled=True):
+    ret = ""
+    if not enabled:
+        ret += "variable        l_spring_spin equal 0.0\n"
+        return ret
+    ntypes = len(m_spring_spin_k)
+    for ii in range(ntypes):
+        ret += f"group           type_{ii + 1} type {ii + 1}\n"
+    for ii in range(ntypes):
+        if var_spring:
+            m_spring_const = m_spring_spin_k[ii] * (1 - lamb)
+        else:
+            m_spring_const = m_spring_spin_k[ii]
+        ret += f"fix             l_spring_spin_{ii + 1} type_{ii + 1} spring/spin {m_spring_const:.10e}\n"
+        ret += "fix_modify      l_spring_spin_%s energy yes\n" % (ii + 1)
+    sum_str = "f_l_spring_spin_1"
+    for ii in range(1, ntypes):
+        sum_str += "+f_l_spring_spin_%s" % (ii + 1)
+    ret += f"variable        l_spring_spin equal {sum_str}\n"
+    return ret
 
 def _ff_soft_lj(
     lamb, model, m_spring_k, step, sparam, if_meam=False, meam_model=None, append=None
@@ -286,7 +332,15 @@ def _ff_soft_lj(
 
 
 def _ff_two_steps(
-    lamb, model, m_spring_k, step, append=None, if_meam=False, meam_model=None
+    lamb,
+    model,
+    m_spring_k,
+    m_spring_spin_k,
+    step,
+    append=None,
+    if_meam=False,
+    meam_model=None,
+    spring_lambda_mode="joint",
 ):
     ret = ""
     ret += "# --------------------- FORCE FIELDS ---------------------\n"
@@ -295,41 +349,86 @@ def _ff_two_steps(
         ret += f'pair_coeff      * * {meam_model["library"]} {meam_model["element"]} {meam_model["potential"]} {meam_model["element"]}\n'
     else:
         if append:
-            ret += f"pair_style      deepmd {model:s} {append:s}\n"
+            ret += f"pair_style      deepspin {model:s} {append:s}\n"
         else:
-            ret += f"pair_style      deepmd {model:s}\n"
+            ret += f"pair_style      deepspin {model:s}\n"
         ret += "pair_coeff * *\n"
 
-    if step == "both" or step == "spring_off":
-        var_spring = True
+    # var_xxx allow xxx to change with time.
+    if step == "both":
+        var_lattice_spring = True
+        var_spin_spring = True
     elif step == "deep_on":
-        var_spring = False
+        var_lattice_spring = False
+        var_spin_spring = False
+    elif step == "spring_off":
+        var_lattice_spring = True
+        var_spin_spring = spring_lambda_mode == "joint"
+    elif step == "lattice_spring_off":
+        var_lattice_spring = True
+        var_spin_spring = False
+    elif step == "spin_spring_off":
+        var_lattice_spring = False
+        var_spin_spring = True
     else:
-        raise RuntimeError("unkown step", step)
+        raise RuntimeError("unknown step", step)
+
+    enable_lattice_spring = spring_lambda_mode != "spin_only"
+    enable_spin_spring = spring_lambda_mode != "lattice_only"
+    if step == "spin_spring_off":
+        enable_lattice_spring = False
+        enable_spin_spring = True
+    if step == "lattice_spring_off":
+        enable_lattice_spring = True
+        enable_spin_spring = False
+
     if step == "both" or step == "deep_on":
         var_deep = True
-    elif step == "spring_off":
+    elif step == "spring_off" or step == "lattice_spring_off" or step == "spin_spring_off":
         var_deep = False
     else:
-        raise RuntimeError("unkown step", step)
-
-    ret += _ff_spring(lamb, m_spring_k, var_spring)
+        raise RuntimeError("unknown step", step)
+    # 1. joint spring_off lattice_flag = 1; spin_flag = 1
+    #   var_lattice = True; var_spin = True;
+    #   enable_lattice = True; enable_spin = True;
+    # 2. seperate spring_off lattice_flag = 1; spin_flag = 1
+    #   var_lattice = True; var_spin = False;
+    #   enable_lattice = True; enable_spin = True;
+    #   seperate spin_spring_off 
+    #   var_lattice = False; var_spin = True;
+    #   enable_lattice = False; enable_spin = True;
+    # 3. only lattice_spring_off lattice_flag = 1; spin_flag = 0
+    #  var_lattice = True; var_spin = False;
+    #  enable_lattice = True; enable_spin = False;
+    # 4. only spin_spring_off lattice_flag = 0; spin_flag = 1
+    #  var_lattice = False; var_spin = True;
+    #  enable_lattice = False; enable_spin = True;
+    ret += _ff_spring(lamb, m_spring_k, var_lattice_spring, enabled=enable_lattice_spring)
+    ret += _ff_spring_spin(
+        lamb,
+        m_spring_spin_k,
+        var_spin_spring,
+        enabled=enable_spin_spring,
+    )
 
     if var_deep:
         if if_meam:
             ret += "fix             l_deep all adapt 1 pair meam scale * * v_LAMBDA\n"
         else:
-            ret += "fix             l_deep all adapt 1 pair deepmd scale * * v_LAMBDA\n"
+            ret += "fix             l_deep all adapt 1 pair deepspin scale * * v_LAMBDA\n"
     ret += "compute         e_deep all pe pair\n"
+    ret += "compute         spin all property/atom sp spx spy spz fmx fmy fmz\n"
     return ret
 
 
 def _gen_lammps_input(
     conf_file,
     mass_map,
+    spin_mass,
     lamb,
     model,
     m_spring_k,
+    m_spring_spin_k,
     nsteps,
     timestep,
     ens,
@@ -348,6 +447,9 @@ def _gen_lammps_input(
     meam_model=None,
     custom_variables=None,
     append=None,
+    spring_lambda_mode="joint",
+    lattice_flag=1,
+    spin_flag=1,
 ):
     ret = ""
     ret += "clear\n"
@@ -355,6 +457,7 @@ def _gen_lammps_input(
     ret += "variable        NSTEPS          equal %d\n" % nsteps
     ret += "variable        THERMO_FREQ     equal %d\n" % thermo_freq
     ret += "variable        DUMP_FREQ       equal %d\n" % dump_freq
+    ret += f"variable        SP_MASS            equal {spin_mass:f}\n"
     ret += f"variable        TEMP            equal {temp:f}\n"
     ret += f"variable        PRES            equal {pres:f}\n"
     ret += f"variable        TAU_T           equal {tau_t:f}\n"
@@ -367,7 +470,7 @@ def _gen_lammps_input(
     ret += "# ---------------------- INITIALIZAITION ------------------\n"
     ret += "units           metal\n"
     ret += "boundary        p p p\n"
-    ret += "atom_style      atomic\n"
+    ret += "atom_style      spin\n"
     ret += "# --------------------- ATOM DEFINITION ------------------\n"
     ret += "box             tilt large\n"
     ret += f"read_data       {conf_file}\n"
@@ -383,10 +486,12 @@ def _gen_lammps_input(
             lamb,
             model,
             m_spring_k,
+            m_spring_spin_k,
             step,
             append=append,
             if_meam=if_meam,
             meam_model=meam_model,
+            spring_lambda_mode=spring_lambda_mode,
         )
     elif switch == "three-step":
         ret += _ff_soft_lj(
@@ -410,14 +515,14 @@ def _gen_lammps_input(
     if 1 - lamb != 0:
         if not isinstance(m_spring_k, list):
             if switch == "three-step":
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_diff[1] c_allmsd[*]\n"
+                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_diff[1] f_l_spring_spin c_allmsd[*]\n"
             else:
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_deep c_allmsd[*]\n"
+                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_deep f_l_spring_spin c_allmsd[*]\n"
         else:
             if switch == "three-step":
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_diff[1] c_allmsd[*]\n"
+                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_diff[1] v_l_spring_spin c_allmsd[*]\n"
             else:
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_deep c_allmsd[*]\n"
+                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_deep v_l_spring_spin c_allmsd[*]\n"
     else:
         if switch == "three-step":
             ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_diff[1] c_e_diff[1] c_allmsd[*]\n"
@@ -425,28 +530,48 @@ def _gen_lammps_input(
             ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_deep c_e_deep c_allmsd[*]\n"
     ret += "thermo_modify   format 9 %.16e\n"
     ret += "thermo_modify   format 10 %.16e\n"
-    ret += "dump            1 all custom ${DUMP_FREQ} dump.hti id type x y z vx vy vz\n"
+    ret += "thermo_modify   format 11 %.16e\n"
+    ret += "dump            1 all custom ${DUMP_FREQ} dump.hti id type x y z vx vy vz c_spin[1] c_spin[2] c_spin[3] c_spin[4] c_spin[5] c_spin[6] c_spin[7]\n"
     if ens == "nvt":
-        ret += "fix             1 all nvt temp ${TEMP} ${TEMP} ${TAU_T}\n"
-    elif ens == "nvt-langevin":
-        ret += "fix             1 all nve\n"
-        ret += "fix             2 all langevin ${TEMP} ${TEMP} ${TAU_T} %d" % (
+        ret += "fix             1 all nvt temp ${TEMP} ${TEMP} ${TAU_T} mass ${SP_MASS} rand %d\n" % (
             np.random.default_rng().integers(1, 2**16)
         )
-        if crystal == "frenkel":
-            ret += " zero yes\n"
-        else:
-            ret += " zero no\n"
+    elif ens == "nvt-langevin":
+        ret += (
+            "fix             1 all nve/spin lattice_flag %d spin_flag %d\n"
+            % (lattice_flag, spin_flag)
+        )
+        if lattice_flag:
+            ret += "fix             2 all langevin ${TEMP} ${TEMP} ${TAU_T} %d" % (
+                np.random.default_rng().integers(1, 2**16)
+            )
+            if crystal == "frenkel":
+                ret += " zero yes\n"
+            else:
+                ret += " zero no\n"
+        if spin_flag:
+            ret += "fix             3 all langevin/spin ${TEMP} ${TEMP} ${TAU_T} %d zero yes\n" % (
+                np.random.default_rng().integers(1, 2**16)
+            )
     elif ens == "npt-iso" or ens == "npt":
-        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} iso ${PRES} ${PRES} ${TAU_P}\n"
+        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} iso ${PRES} ${PRES} ${TAU_P} mass ${SP_MASS} rand %d\n"% (
+            np.random.default_rng().integers(1, 2**16)
+        )
     elif ens == "nve":
         ret += "fix             1 all nve\n"
     else:
         raise RuntimeError(f"unknow ensemble {ens}\n")
+
     ret += "# --------------------- INITIALIZE -----------------------\n"
-    ret += "velocity        all create ${TEMP} %d\n" % (
-        np.random.default_rng().integers(1, 2**16)
-    )
+    # 其实这里不用去额外关注. 因为 在nve中已经constrain了. 
+    if lattice_flag and spin_flag:
+        ret += "velocity        all create ${TEMP} %d spin yes spmass ${SP_MASS}\n" % (
+            np.random.default_rng().integers(1, 2**16)
+        )
+    elif lattice_flag:
+        ret += "velocity        all create ${TEMP} %d\n" % (
+            np.random.default_rng().integers(1, 2**16)
+        )
     if crystal == "frenkel":
         ret += "fix             fc all recenter INIT INIT INIT\n"
         ret += "fix             fm all momentum 1 linear 1 1 1\n"
@@ -461,82 +586,8 @@ def _gen_lammps_input(
     ret += "# --------------------- RUN ------------------------------\n"
     ret += "run             ${NSTEPS}\n"
     ret += "write_data      out.lmp\n"
-
     return ret
 
-
-# def _gen_lammps_input_ideal (conf_file,
-#                              mass_map,
-#                              lamb,
-#                              model,
-#                              nsteps,
-#                              dt,
-#                              ens,
-#                              temp,
-#                              pres = 1.0,
-#                              tau_t = 0.1,
-#                              tau_p = 0.5,
-#                              prt_freq = 100,
-#                              copies = None,
-#                              norm_style = 'first',
-#                              if_meam = False,
-#                              meam_model = None) :
-#     ret = ''
-#     ret += 'clear\n'
-#     ret += '# --------------------- VARIABLES-------------------------\n'
-#     ret += 'variable        NSTEPS          equal %d\n' % nsteps
-#     ret += 'variable        THERMO_FREQ     equal %d\n' % prt_freq
-#     ret += 'variable        DUMP_FREQ       equal %d\n' % prt_freq
-#     ret += 'variable        TEMP            equal %f\n' % temp
-#     ret += 'variable        PRES            equal %f\n' % pres
-#     ret += 'variable        TAU_T           equal %f\n' % tau_t
-#     ret += 'variable        TAU_P           equal %f\n' % tau_p
-#     ret += 'variable        LAMBDA          equal %.10e\n' % lamb
-#     ret += 'variable        ZERO            equal 0\n'
-#     ret += '# ---------------------- INITIALIZAITION ------------------\n'
-#     ret += 'units           metal\n'
-#     ret += 'boundary        p p p\n'
-#     ret += 'atom_style      atomic\n'
-#     ret += '# --------------------- ATOM DEFINITION ------------------\n'
-#     ret += 'box             tilt large\n'
-#     ret += 'read_data       %s\n' % conf_file
-#     if copies is not None :
-#         ret += 'replicate       %d %d %d\n' % (copies[0], copies[1], copies[2])
-#     ret += 'change_box      all triclinic\n'
-#     for jj in range(len(mass_map)) :
-#         ret += "mass            %d %f\n" %(jj+1, mass_map[jj])
-#     ret += '# --------------------- FORCE FIELDS ---------------------\n'
-#     ret += 'pair_style      deepmd %s\n' % model
-#     ret += 'pair_coeff * *\n'
-#     ret += 'fix             l_deep all adapt 1 pair deepmd scale * * v_LAMBDA\n'
-#     ret += 'compute         e_deep all pe pair\n'
-#     ret += '# --------------------- MD SETTINGS ----------------------\n'
-#     ret += 'neighbor        1.0 bin\n'
-#     ret += 'timestep        %s\n' % dt
-#     ret += 'thermo          ${THERMO_FREQ}\n'
-#     ret += 'thermo_style    custom step ke pe etotal enthalpy temp press vol v_ZERO c_e_deep c_allmsd[*]\n'
-#     ret += 'thermo_modify   format 10 %.16e\n'
-#     ret += '# dump            1 all custom ${DUMP_FREQ} dump.hti id type x y z vx vy vz\n'
-#     if ens == 'nvt' :
-#         ret += 'fix             1 all nvt temp ${TEMP} ${TEMP} ${TAU_T}\n'
-#     elif ens == 'nvt-langevin' :
-#         ret += 'fix             1 all nve\n'
-#         ret += 'fix             2 all langevin ${TEMP} ${TEMP} ${TAU_T} %d zero yes\n' % (np.random.randint(1, 2**16))
-#     elif ens == 'npt-iso' or ens == 'npt':
-#         ret += 'fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} iso ${PRES} ${PRES} ${TAU_P}\n'
-#     elif ens == 'nve' :
-#         ret += 'fix             1 all nve\n'
-#     else :
-#         raise RuntimeError('unknow ensemble %s\n' % ens)
-#     ret += 'fix             mzero all momentum 10 linear 1 1 1\n'
-#     ret += '# --------------------- INITIALIZE -----------------------\n'
-#     ret += 'velocity        all create ${TEMP} %d\n' % (np.random.randint(1, 2**16))
-#     ret += 'velocity        all zero linear\n'
-#     ret += '# --------------------- RUN ------------------------------\n'
-#     ret += 'run             ${NSTEPS}\n'
-#     ret += 'write_data      out.lmp\n'
-
-#     return ret
 
 
 def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None):
@@ -548,6 +599,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
 
     if if_meam is None:
         if_meam = jdata.get("if_meam", None)
+    spring_lambda_mode = _get_spring_lambda_mode(jdata)
 
     if switch == "one-step":
         subtask_name = iter_name
@@ -595,51 +647,67 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                 if_meam=if_meam,
                 meam_model=meam_model,
             )
-            subtask_name = "01.spring_off"
-            _make_tasks(
-                subtask_name,
-                jdata,
-                ref,
-                switch=switch,
-                step="spring_off",
-                link=True,
-                if_meam=if_meam,
-                meam_model=meam_model,
-            )
-        elif switch == "three-step":
-            subtask_name = "00.lj_on"
-            _make_tasks(
-                subtask_name,
-                jdata,
-                ref,
-                switch=switch,
-                step="lj_on",
-                link=True,
-                if_meam=if_meam,
-                meam_model=meam_model,
-            )
-            subtask_name = "01.deep_on"
-            _make_tasks(
-                subtask_name,
-                jdata,
-                ref,
-                switch=switch,
-                step="deep_on",
-                link=True,
-                if_meam=if_meam,
-                meam_model=meam_model,
-            )
-            subtask_name = "02.spring_off"
-            _make_tasks(
-                subtask_name,
-                jdata,
-                ref,
-                switch=switch,
-                step="spring_off",
-                link=True,
-                if_meam=if_meam,
-                meam_model=meam_model,
-            )
+            if spring_lambda_mode == "joint":
+                subtask_name = "01.spring_off"
+                _make_tasks(
+                    subtask_name,
+                    jdata,
+                    ref,
+                    switch=switch,
+                    step="spring_off",
+                    link=True,
+                    if_meam=if_meam,
+                    meam_model=meam_model,
+                )
+            elif spring_lambda_mode == "split":
+                subtask_name = "01.spring_off"
+                _make_tasks(
+                    subtask_name,
+                    jdata,
+                    ref,
+                    switch=switch,
+                    step="spring_off",
+                    link=True,
+                    if_meam=if_meam,
+                    meam_model=meam_model,
+                )
+                subtask_name = "02.spin_spring_off"
+                _make_tasks(
+                    subtask_name,
+                    jdata,
+                    ref,
+                    switch=switch,
+                    step="spin_spring_off",
+                    link=True,
+                    if_meam=if_meam,
+                    meam_model=meam_model,
+                )
+            elif spring_lambda_mode == "lattice_only":
+                subtask_name = "01.lattice_spring_off"
+                _make_tasks(
+                    subtask_name,
+                    jdata,
+                    ref,
+                    switch=switch,
+                    step="lattice_spring_off",
+                    link=True,
+                    if_meam=if_meam,
+                    meam_model=meam_model,
+                )
+            elif spring_lambda_mode == "spin_only":
+                subtask_name = "01.spin_spring_off"
+                _make_tasks(
+                    subtask_name,
+                    jdata,
+                    ref,
+                    switch=switch,
+                    step="spin_spring_off",
+                    link=True,
+                    if_meam=if_meam,
+                    meam_model=meam_model,
+                )
+            else:
+                raise RuntimeError("unknown spring_lambda_mode", spring_lambda_mode)
         else:
             raise RuntimeError("unknow switch", switch)
         os.chdir(cwd)
@@ -662,6 +730,7 @@ def _make_tasks(
         jdata["crystal"] = "vega"
 
     crystal = jdata["crystal"]
+    spring_lambda_mode = _get_spring_lambda_mode(jdata)
     protect_eps = jdata["protect_eps"]
 
     if switch == "one-step":
@@ -683,6 +752,15 @@ def _make_tasks(
             all_lambda = parse_seq(jdata["lambda_deep_on"])
         elif step == "spring_off":
             all_lambda = parse_seq(jdata["lambda_spring_off"])
+        elif step == "lattice_spring_off":
+            all_lambda = parse_seq(jdata["lambda_spring_off"])
+        elif step == "spin_spring_off":
+            all_lambda = parse_seq(
+                get_first_matched_key_from_dict(
+                    jdata,
+                    ["lambda_spin_spring_off", "lambda_spring_off"],
+                )
+            )
         elif step == "lj_on":
             all_lambda = parse_seq(jdata["lambda_lj_on"])
         else:
@@ -699,41 +777,22 @@ def _make_tasks(
     model = os.path.abspath(model)
     # mass_map = jdata['mass_map']
     mass_map = get_first_matched_key_from_dict(jdata, ["mass_map", "model_mass_map"])
+    spin_mass = get_first_matched_key_from_dict(jdata, ["spin_mass_map", "sp_mass_map", "spin_mass"])
+
     nsteps = jdata["nsteps"]
     # timestep = jdata['timestep']
     timestep = get_first_matched_key_from_dict(jdata, ["timestep", "dt"])
     spring_k = jdata["spring_k"]
+    spring_spin_k = jdata["spring_spin_k"]
     custom_variables = jdata.get("custom_variables", None)
     append = jdata.get("append", None)
 
-    sparam = jdata.get("soft_param", {})
-    if sparam:
-        # update for fields in jsons relating to water
-
-        if "sigma_oo" in sparam:
-            sparam["sigma_0_0"] = sparam["sigma_oo"]
-            sparam["sigma_0_1"] = sparam["sigma_oh"]
-            sparam["sigma_1_1"] = sparam["sigma_hh"]
-
-        element_num = len(mass_map)
-        sparam["element_num"] = element_num
-
-        sigma_key_index = filter(
-            lambda t: t[0] <= t[1],
-            ((i, j) for i in range(element_num) for j in range(element_num)),
-        )
-        sigma_key_name_list = [
-            "sigma_" + str(t[0]) + "_" + str(t[1]) for t in sigma_key_index
-        ]
-        for sigma_key_name in sigma_key_name_list:
-            assert sparam.get(
-                sigma_key_name, None
-            ), f"there must be key-value for {sigma_key_name} in soft_param"
-
     if crystal == "frenkel":
         m_spring_k = []
+        m_spring_spin_k = []
         for ii in mass_map:
             m_spring_k.append(spring_k * ii)
+            m_spring_spin_k.append(spring_spin_k * ii * spin_mass) # ensure different spring for magnetic atoms. mark
     if crystal == "vega":
         m_spring_k = []
         for ii in mass_map:
@@ -802,13 +861,23 @@ def _make_tasks(
             ens = "nvt"
         if langevin:
             ens = "nvt-langevin"
+
+        lattice_flag = 1
+        spin_flag = 1
+        if spring_lambda_mode == "lattice_only":
+            spin_flag = 0
+        elif spring_lambda_mode == "spin_only":
+            lattice_flag = 0
+
         if ref == "einstein":
             lmp_str = _gen_lammps_input(
                 "conf.lmp",
                 mass_map,
+                spin_mass,
                 ii,
                 "graph.pb",
                 m_spring_k,
+                m_spring_spin_k,
                 nsteps,
                 timestep,
                 ens,
@@ -818,12 +887,15 @@ def _make_tasks(
                 copies=copies,
                 switch=switch,
                 step=step,
-                sparam=sparam,
+                sparam={},
                 crystal=crystal,
                 if_meam=if_meam,
                 meam_model=meam_model,
                 custom_variables=custom_variables,
                 append=append,
+                spring_lambda_mode=spring_lambda_mode,
+                lattice_flag=lattice_flag,
+                spin_flag=spin_flag,
             )
         elif ref == "ideal":
             raise RuntimeError("choose hti_liq.py")
@@ -847,73 +919,6 @@ def _make_tasks(
         with open("lambda.out", "w") as fp:
             fp.write(str(ii))
         os.chdir(cwd)
-
-
-def refine_task(
-    from_task, to_task, err, print_ref=False, if_meam=None, meam_model=None
-):
-    # raise RuntimeError('No entry')
-    from_task = os.path.abspath(from_task)
-    to_task = os.path.abspath(to_task)
-
-    from_ti = os.path.join(from_task, "hti.out")
-    if not os.path.isfile(from_ti):
-        raise RuntimeError(
-            f"cannot find file {from_ti}, task should be computed befor refined"
-        )
-    tmp_array = np.loadtxt(from_ti)
-    all_t = tmp_array[:, 0]
-    integrand = tmp_array[:, 1]
-    ntask = all_t.size
-
-    interval_nrefine = compute_nrefine(all_t, integrand, err)
-    if print_ref:
-        print(interval_nrefine)
-        return
-
-    refined_t = []
-    back_map = []
-    for ii in range(0, ntask - 1):
-        refined_t.append(all_t[ii])
-        back_map.append(ii)
-        hh = (all_t[ii + 1] - all_t[ii]) / interval_nrefine[ii]
-        for jj in range(1, interval_nrefine[ii]):
-            refined_t.append(all_t[ii] + jj * hh)
-            back_map.append(-1)
-    refined_t.append(all_t[-1])
-    back_map.append(ntask - 1)
-
-    from_json = os.path.join(from_task, "in.json")
-    to_json = os.path.join(to_task, "in.json")
-    from_jdata = json.load(open(from_json))
-    to_jdata = from_jdata
-
-    to_jdata["lambda"] = refined_t
-    to_jdata["orig_task"] = from_task
-    to_jdata["back_map"] = back_map
-    to_jdata["refine_error"] = err
-    to_jdata["equi_conf"] = get_task_file_abspath(from_task, from_jdata["equi_conf"])
-    to_jdata["model"] = get_task_file_abspath(from_task, from_jdata["model"])
-
-    make_tasks(to_task, to_jdata, to_jdata["reference"], if_meam=if_meam)
-
-    from_task_list = glob.glob(os.path.join(from_task, "task.[0-9]*"))
-    from_task_list.sort()
-    to_task_list = glob.glob(os.path.join(to_task, "task.[0-9]*"))
-    to_task_list.sort()
-    assert len(from_task_list) == ntask
-    assert len(to_task_list) == len(refined_t)
-
-    for ii in range(len(to_task_list)):
-        if back_map[ii] < 0:
-            continue
-        for jj in ["data", "log.lammps"]:
-            shutil.copyfile(
-                os.path.join(from_task_list[back_map[ii]], jj),
-                os.path.join(to_task_list[ii], jj),
-            )
-        with open(os.path.join(to_task_list[ii], "from.dir"), "w") as fp:
-            fp.write(from_task_list[back_map[ii]])
 
 
 def _compute_thermo(fname, natoms, stat_skip, stat_bsize):
@@ -947,6 +952,8 @@ def post_tasks(iter_name, jdata, natoms=None, method="inte", scheme="s"):
     if os.path.isdir(os.path.join(iter_name, "00.lj_on")):
         switch = "three-step"
 
+    spring_lambda_mode = _get_spring_lambda_mode(jdata)
+
     if switch == "two-step":
         subtask_name = os.path.join(iter_name, "00.deep_on")
         if method == "inte":
@@ -965,86 +972,55 @@ def post_tasks(iter_name, jdata, natoms=None, method="inte", scheme="s"):
         else:
             raise RuntimeError("unknow method for integration")
         print(f"# fe of deep_on:    {e0:20.12f}  {err0[0]:10.3e} {err0[1]:10.3e}")
-        subtask_name = os.path.join(iter_name, "01.spring_off")
-        if method == "inte":
-            e1, err1, tinfo1 = _post_tasks(
-                subtask_name,
-                jdata,
-                natoms=natoms,
-                scheme=scheme,
-                switch=switch,
-                step="spring_off",
+        sub_steps = []
+        if spring_lambda_mode in ["joint", "split"]:
+            sub_steps.append(("spring_off", os.path.join(iter_name, "01.spring_off")))
+        elif spring_lambda_mode == "lattice_only":
+            sub_steps.append(
+                ("lattice_spring_off", os.path.join(iter_name, "01.lattice_spring_off"))
             )
-        elif method == "mbar":
-            e1, err1, tinfo1 = _post_tasks_mbar(
-                subtask_name, jdata, natoms=natoms, switch=switch, step="spring_off"
+        elif spring_lambda_mode == "spin_only":
+            sub_steps.append(
+                ("spin_spring_off", os.path.join(iter_name, "01.spin_spring_off"))
             )
         else:
-            raise RuntimeError("unknow method for integration")
-        print(f"# fe of spring_off: {e1:20.12f}  {err1[0]:10.3e} {err1[1]:10.3e}")
-        de = e0 + e1
-        stt_err = np.sqrt(np.square(err0[0]) + np.square(err1[0]))
-        sys_err = (err0[1]) + (err1[1])
-        err = [stt_err, sys_err]
-        tinfo = tinfo1
-    elif switch == "three-step":
-        subtask_name = os.path.join(iter_name, "00.lj_on")
-        print("# HTI three-step integration [value, stt_err, sys_err]")
-        if method == "inte":
-            e0, err0, tinfo0 = _post_tasks(
-                subtask_name,
-                jdata,
-                natoms=natoms,
-                scheme=scheme,
-                switch=switch,
-                step="lj_on",
+            raise RuntimeError("unknown spring_lambda_mode", spring_lambda_mode)
+
+        if spring_lambda_mode == "split":
+            sub_steps.append(
+                ("spin_spring_off", os.path.join(iter_name, "02.spin_spring_off"))
             )
-        elif method == "mbar":
-            e0, err0, tinfo0 = _post_tasks_mbar(
-                subtask_name, jdata, natoms=natoms, switch=switch, step="lj_on"
-            )
-        else:
-            raise RuntimeError("unknow method for integration")
-        print(f"# fe of lj_on:      {e0:20.12f}  {err0[0]:10.3e} {err0[1]:10.3e}")
-        subtask_name = os.path.join(iter_name, "01.deep_on")
-        if method == "inte":
-            e1, err1, tinfo1 = _post_tasks(
-                subtask_name,
-                jdata,
-                natoms=natoms,
-                scheme=scheme,
-                switch=switch,
-                step="deep_on",
-            )
-        elif method == "mbar":
-            e1, err1, tinfo1 = _post_tasks_mbar(
-                subtask_name, jdata, natoms=natoms, switch=switch, step="deep_on"
-            )
-        else:
-            raise RuntimeError("unknow method for integration")
-        print(f"# fe of deep_on:   {e1:20.12f}  {err1[0]:10.3e} {err1[1]:10.3e}")
-        subtask_name = os.path.join(iter_name, "02.spring_off")
-        if method == "inte":
-            e2, err2, tinfo2 = _post_tasks(
-                subtask_name,
-                jdata,
-                natoms=natoms,
-                scheme=scheme,
-                switch=switch,
-                step="spring_off",
-            )
-        elif method == "mbar":
-            e2, err2, tinfo2 = _post_tasks_mbar(
-                subtask_name, jdata, natoms=natoms, switch=switch, step="spring_off"
-            )
-        else:
-            raise RuntimeError("unknow method for integration")
-        print(f"# fe of spring_off: {e2:20.12f}  {err2[0]:10.3e} {err2[1]:10.3e}")
-        de = e0 + e1 + e2
-        stt_err = np.sqrt(np.square(err0[0]) + np.square(err1[0]) + np.square(err2[0]))
-        sys_err = (err0[1]) + (err1[1]) + (err2[1])
-        err = [stt_err, sys_err]
-        tinfo = tinfo2
+
+        de = e0
+        stt_err2 = np.square(err0[0])
+        sys_err = err0[1]
+        tinfo = tinfo0
+
+        for sub_step, subtask_name in sub_steps:
+            if method == "inte":
+                ei, erri, tinfo = _post_tasks(
+                    subtask_name,
+                    jdata,
+                    natoms=natoms,
+                    scheme=scheme,
+                    switch=switch,
+                    step=sub_step,
+                )
+            elif method == "mbar":
+                ei, erri, tinfo = _post_tasks_mbar(
+                    subtask_name,
+                    jdata,
+                    natoms=natoms,
+                    switch=switch,
+                    step=sub_step,
+                )
+            else:
+                raise RuntimeError("unknow method for integration")
+            print(f"# fe of {sub_step}: {ei:20.12f}  {erri[0]:10.3e} {erri[1]:10.3e}")
+            de += ei
+            stt_err2 += np.square(erri[0])
+            sys_err += erri[1]
+        err = [np.sqrt(stt_err2), sys_err]
     else:
         if method == "inte":
             de, err, tinfo = _post_tasks(iter_name, jdata, natoms=natoms, scheme=scheme)
@@ -1065,12 +1041,16 @@ def _post_tasks(
     assert os.path.isfile(equi_conf)
     if natoms is None:
         natoms = get_natoms(equi_conf)
+        nspins = get_nspins(equi_conf, natoms)
         if "copies" in jdata:
             natoms *= np.prod(jdata["copies"])
+            nspins *= np.prod(jdata["copies"])
 
     all_lambda = []
     all_es = []
     all_es_err = []
+    all_esp = []
+    all_esp_err = []
     all_ed = []
     all_ed_err = []
 
@@ -1085,19 +1065,24 @@ def _post_tasks(
         np.savetxt(os.path.join(ii, "data"), data, fmt="%.6e")
         sa, se = block_avg(data[:, 8], skip=stat_skip, block_size=stat_bsize)
         da, de = block_avg(data[:, 9], skip=stat_skip, block_size=stat_bsize)
+        spa, spe = block_avg(data[:, 10], skip=stat_skip, block_size=stat_bsize)
         etot, etot_err = block_avg(data[:, 3], skip=stat_skip, block_size=stat_bsize)
         enthalpy, _ = block_avg(data[:, 4], skip=stat_skip, block_size=stat_bsize)
         msd_xyz = data[-1, -1]
         sa /= natoms
         se /= natoms
+        spa /= natoms
+        spe /= natoms
         da /= natoms
         de /= natoms
         lmda_name = os.path.join(ii, "lambda.out")
         ll = float(open(lmda_name).read())
         all_lambda.append(ll)
         all_es.append(sa)
+        all_esp.append(spa)
         all_ed.append(da)
         all_es_err.append(se)
+        all_esp_err.append(spe)
         all_ed_err.append(de)
 
         all_etot.append(etot / natoms)
@@ -1107,35 +1092,52 @@ def _post_tasks(
 
     all_lambda = np.array(all_lambda)
     all_es = np.array(all_es)
+    all_esp = np.array(all_esp)
     all_ed = np.array(all_ed)
     all_es_err = np.array(all_es_err)
+    all_esp_err = np.array(all_esp_err)
     all_ed_err = np.array(all_ed_err)
+    spring_lambda_mode = _get_spring_lambda_mode(jdata)
     if switch == "one-step" or switch == "two-step":
         if step == "both":
-            de = all_ed / all_lambda - all_es / (1 - all_lambda)
+            de = all_ed / all_lambda - (all_es + all_esp) / (1 - all_lambda)
             all_err = np.sqrt(
                 np.square(all_ed_err / all_lambda)
                 + np.square(all_es_err / (1 - all_lambda))
+                + np.square(all_esp_err / (1 - all_lambda))
             )
         elif step == "deep_on":
             de = all_ed / all_lambda
             all_err = all_ed_err / all_lambda
         elif step == "spring_off":
+            if spring_lambda_mode == "split":
+                de = -all_es / (1 - all_lambda)
+                all_err = all_es_err / (1 - all_lambda)
+            else:
+                de = -(all_es + all_esp) / (1 - all_lambda)
+                all_err = np.sqrt(
+                    np.square(all_es_err / (1 - all_lambda))
+                    + np.square(all_esp_err / (1 - all_lambda))
+                )
+        elif step == "lattice_spring_off":
             de = -all_es / (1 - all_lambda)
             all_err = all_es_err / (1 - all_lambda)
+        elif step == "spin_spring_off":
+            de = -all_esp / (1 - all_lambda)
+            all_err = all_esp_err / (1 - all_lambda)
         else:
             raise RuntimeError("unknow step", step)
-    elif switch == "three-step":
-        if step == "lj_on" or step == "deep_on":
-            de = all_ed # 这里跟之前的不一样是因为在lammps in文件中的thermo形式与之前不同. 
-            all_err = all_ed_err
-        elif step == "spring_off":
-            de = -all_es / (1 - all_lambda) + all_ed
-            all_err = np.sqrt(
-                np.square(all_es_err / (1 - all_lambda)) + np.square(all_ed_err)
-            )
-        else:
-            raise RuntimeError("unknow step", step)
+    # elif switch == "three-step": # 由于lj这块有问题 暂时不考虑three-step. 
+    #     if step == "lj_on" or step == "deep_on":
+    #         de = all_ed # 这里跟之前的不一样是因为在lammps in文件中的thermo形式与之前不同. 
+    #         all_err = all_ed_err
+    #     elif step == "spring_off":
+    #         de = -all_es / (1 - all_lambda) + all_ed
+    #         all_err = np.sqrt(
+    #             np.square(all_es_err / (1 - all_lambda)) + np.square(all_ed_err)
+    #         )
+    #     else:
+    #         raise RuntimeError("unknow step", step)
     else:
         raise RuntimeError("unknow switch", switch)
     # 在分步热力学积分中，系统的总势能 $U(\lambda)$ 通常这样定义：
@@ -1155,8 +1157,10 @@ def _post_tasks(
     all_print.append(all_err)
     all_print.append(all_ed / all_lambda)
     all_print.append(all_es / (1 - all_lambda))
+    all_print.append(all_esp / (1 - all_lambda))
     all_print.append(all_ed_err / all_lambda)
     all_print.append(all_es_err / (1 - all_lambda))
+    all_print.append(all_esp_err / (1 - all_lambda))
     all_print.append(all_etot)
     # all_print.append(all_etot_err)
     all_print.append(all_es)
@@ -1167,7 +1171,7 @@ def _post_tasks(
         os.path.join(iter_name, "hti.out"),
         all_print.T,
         fmt="%.8e",
-        header="lmbda dU dU_err Ud Us Ud_err Us_err etot spring_eng enthalpy msd_xyz",
+        header="lmbda dU dU_err Ud Us Usp Ud_err Us_err Usp_err etot spring_eng enthalpy msd_xyz",
     )
 
     diff_e, err, sys_err = integrate_range_hti(all_lambda, de, all_err, scheme=scheme)
@@ -1232,6 +1236,7 @@ def _post_tasks_mbar(iter_name, jdata, natoms=None, switch="one-step", step="bot
 
     ukn = np.array([])
     nk = []
+    spring_lambda_mode = _get_spring_lambda_mode(jdata)
     kt_in_ev = pc.Boltzmann * temp / pc.electron_volt
     for idx, ii in enumerate(all_tasks):
         log_name = os.path.join(ii, "log.lammps")
@@ -1239,13 +1244,15 @@ def _post_tasks_mbar(iter_name, jdata, natoms=None, switch="one-step", step="bot
         np.savetxt(os.path.join(ii, "data"), data, fmt="%.6e")
         this_ed = data[:, 9] / kt_in_ev
         this_es = data[:, 8] / kt_in_ev
+        this_esp = data[:, 10] / kt_in_ev
         this_ed = this_ed[stat_skip::1]
         this_es = this_es[stat_skip::1]
+        this_esp = this_esp[stat_skip::1]
         nk.append(this_ed.size)
         if switch == "one-step" or switch == "two-step":
             if step == "both":
                 ed = this_ed / all_lambda[idx]
-                es = this_es / (1 - all_lambda[idx])
+                es = (this_es + this_esp) / (1 - all_lambda[idx])
                 block_u = []
                 for ll in all_lambda:
                     block_u.append(ed * ll + es * (1 - ll))
@@ -1255,12 +1262,25 @@ def _post_tasks_mbar(iter_name, jdata, natoms=None, switch="one-step", step="bot
                 for ll in all_lambda:
                     block_u.append(ed * ll)
             elif step == "spring_off":
+                if spring_lambda_mode == "split":
+                    es = this_es / (1 - all_lambda[idx])
+                else:
+                    es = (this_es + this_esp) / (1 - all_lambda[idx])
+                block_u = []
+                for ll in all_lambda:
+                    block_u.append(es * (1 - ll))
+            elif step == "lattice_spring_off":
                 es = this_es / (1 - all_lambda[idx])
                 block_u = []
                 for ll in all_lambda:
                     block_u.append(es * (1 - ll))
+            elif step == "spin_spring_off":
+                es = this_esp / (1 - all_lambda[idx])
+                block_u = []
+                for ll in all_lambda:
+                    block_u.append(es * (1 - ll))
             else:
-                raise RuntimeError("unknown switch_style", switch)
+                raise RuntimeError("unknow step", step)
         elif switch == "three-step":
             if step == "lj_on" or step == "deep_on":
                 ed = this_ed
@@ -1321,16 +1341,20 @@ def compute_task(
     manual_pv_err=None,
     npt=None,
 ):
-    # print('hti.compute_task', job, jdata, method, scheme, free_energy_type)
-    # assert 'reference' in jdata
-    # job = args.JOB
     jdata = json.load(open(os.path.join(job, "in.json")))
     if "reference" not in jdata:
         jdata["reference"] = "einstein"
+    spin_like = any(
+        key in jdata for key in ["spin_spring_k", "s_spring_k", "spring_k_spin", "spin_model", "spin_mu"]
+    )
+
     if jdata["crystal"] == "vega":
         e0 = free_energy(job)
     if jdata["crystal"] == "frenkel":
-        e0 = frenkel(job)
+        if spin_like:
+            e0 = magnetic_frenkel(job)
+        else:
+            e0 = frenkel(job)
     de, de_err, thermo_info = post_tasks(job, jdata, method=method, scheme=scheme)
     # printing
     print_format = "%20.12f  %10.3e  %10.3e"
@@ -1481,7 +1505,7 @@ def run_task(task_dir, machine_file, task_name, no_dp=False):
 
 def add_module_subparsers(main_subparsers):
     module_parser = main_subparsers.add_parser(
-        "hti", help="Hamiltonian thermodynamic integration for atomic solid"
+        "hti_mag", help="Hamiltonian thermodynamic integration for atomic solid"
     )
     module_subparsers = module_parser.add_subparsers(
         help="commands of Hamiltonian thermodynamic integration for atomic solid",
@@ -1598,8 +1622,6 @@ def handle_compute(args):
         manual_pv_err=args.pv_err,
         npt=args.npt,
     )
-    # if 'reference' not in jdata :
-    #     jdata['reference'] = 'einstein'
 
 
 def handle_run(args):

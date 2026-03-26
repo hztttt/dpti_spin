@@ -1,0 +1,50 @@
+{
+    "equi_conf": "conf.lmp",
+    "ncopies": [
+        1,
+        1,
+        1
+    ],
+    "lambda_deep_on": [
+        "0.00:0.05:0.010",
+        "0.05:0.15:0.020",
+        "0.15:0.35:0.040",
+        "0.35:1.00:0.065",
+        "1"
+    ],
+    "lambda_spring_off": [
+        "0.000:0.750:0.125",
+        "0.750:0.900:0.050",
+        "0.900:0.960:0.020",
+        "0.960:1.000:0.010",
+        "1"
+    ],
+    "lambda_spin_spring_off": [
+        "0.000:0.750:0.125",
+        "0.750:0.900:0.050",
+        "0.900:0.960:0.020",
+        "0.960:1.000:0.010",
+        "1"
+    ],
+    "protect_eps": 1e-06,
+    "model": "graph.pb",
+    "mass_map": [
+        55.75
+    ],
+    "spin_mass_map": 0.01,
+    "spring_lambda_mode": "lattice_only",
+    "spin_map": [
+        1
+    ],
+    "spring_k": 0.02,
+    "spring_spin_k": 0.02,
+    "crystal": "frenkel",
+    "langevin": true,
+    "nsteps": 500000,
+    "timestep": 0.002,
+    "thermo_freq": 10,
+    "stat_skip": 1000,
+    "stat_bsize": 100,
+    "temp": 200,
+    "if_meam": false
+}

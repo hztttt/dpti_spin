@@ -45,6 +45,8 @@ def gen_equi_header(
     equi_conf,
     pres=None,
     custom_variables=None,
+    is_spin=False,
+    spin_mass=None,
 ):
     ret = ""
     ret += "clear\n"
@@ -54,6 +56,10 @@ def gen_equi_header(
     ret += "variable        DUMP_FREQ       equal %d\n" % dump_freq
     ret += "variable        NREPEAT         equal ${NSTEPS}/${DUMP_FREQ}\n"
     ret += f"variable        TEMP            equal {temp:.6f}\n"
+    if is_spin:
+        if spin_mass is None:
+            raise ValueError("spin_mass must be provided when is_spin=True")
+        ret += f"variable        SP_MASS         equal {spin_mass:f}\n"
     if custom_variables is not None:
         for key, value in custom_variables.items():
             ret += f"variable        {key}            equal {value}\n"
@@ -65,7 +71,10 @@ def gen_equi_header(
     ret += "# ---------------------- INITIALIZAITION ------------------\n"
     ret += "units           metal\n"
     ret += "boundary        p p p\n"
-    ret += "atom_style      atomic\n"
+    if is_spin:
+        ret += "atom_style      spin\n"
+    else:
+        ret += "atom_style      atomic\n"
     ret += "# --------------------- ATOM DEFINITION ------------------\n"
     ret += "box             tilt large\n"
     ret += f"read_data       {equi_conf}\n"
@@ -76,7 +85,7 @@ def gen_equi_header(
 
 
 # def gen_equi_force_field(model, if_meam=None):
-def gen_equi_force_field(model, if_meam=False, meam_model=None, append=None):
+def gen_equi_force_field(model, if_meam=False, meam_model=None, append=None, is_spin=False):
     # equi_settings =
     # model = equi_settings['model']
     # assert type(model) is dict, f"equi_settings['model] must be a dict. model:{model}"
@@ -94,7 +103,8 @@ def gen_equi_force_field(model, if_meam=False, meam_model=None, append=None):
     ret = ""
     ret += "# --------------------- FORCE FIELDS ---------------------\n"
     if not if_meam:
-        ret += f"pair_style      deepmd {model}"
+        pair_cmd = "deepspin" if is_spin else "deepmd"
+        ret += f"pair_style      {pair_cmd} {model}"
         if append is not None:
             ret += " " + append
         ret += "\n"
@@ -108,51 +118,96 @@ def gen_equi_force_field(model, if_meam=False, meam_model=None, append=None):
     return ret
 
 
-def gen_equi_thermo_settings(timestep):
+def gen_equi_thermo_settings(timestep, is_spin=False):
     ret = ""
     ret += "# --------------------- MD SETTINGS ----------------------\n"
     ret += "neighbor        1.0 bin\n"
     ret += f"timestep        {timestep:.6f}\n"
     ret += "thermo          ${THERMO_FREQ}\n"
     ret += "compute         allmsd all msd\n"
+    if is_spin:
+        ret += "compute         spin all property/atom sp spx spy spz fmx fmy fmz\n"
     ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol lx ly lz xy xz yz pxx pyy pzz pxy pxz pyz c_allmsd[*]\n"
     return ret
 
 
-def gen_equi_dump_settings(if_dump_avg_posi):
+def gen_equi_dump_settings(if_dump_avg_posi, is_spin=False):
     ret = ""
     if if_dump_avg_posi:
         ret += "compute         ru all property/atom xu yu zu\n"
         ret += "fix             ap all ave/atom ${DUMP_FREQ} ${NREPEAT} ${NSTEPS} c_ru[1] c_ru[2] c_ru[3]\n"
         ret += "dump            fp all custom ${NSTEPS} dump.avgposi id type f_ap[1] f_ap[2] f_ap[3]\n"
-    ret += (
-        "dump            1 all custom ${DUMP_FREQ} dump.equi id type x y z vx vy vz\n"
-    )
+    if is_spin:
+        ret += "dump            1 all custom ${DUMP_FREQ} dump.equi id type x y z vx vy vz c_spin[1] c_spin[2] c_spin[3] c_spin[4] c_spin[5] c_spin[6] c_spin[7]\n"
+    else:
+        ret += "dump            1 all custom ${DUMP_FREQ} dump.equi id type x y z vx vy vz\n"
     return ret
 
 
-def gen_equi_ensemble_settings(ens, if_dump_avg_posi):
+def gen_equi_ensemble_settings(ens, if_dump_avg_posi, is_spin=False, lattice_flag=1, spin_flag=1):
     # ens = equi_settings['ens']
+    rng = np.random.default_rng()
     ret = ""
-    if ens == "nvt":
-        ret += "fix             1 all nvt temp ${TEMP} ${TEMP} ${TAU_T}\n"
-    elif ens == "npt-iso" or ens == "npt":
-        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} iso ${PRES} ${PRES} ${TAU_P}\n"
-    elif ens == "npt-xy":
-        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} aniso ${PRES} ${PRES} ${TAU_P} couple xy\n"
-    elif ens == "npt-aniso":
-        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} aniso ${PRES} ${PRES} ${TAU_P}\n"
-    elif ens == "npt-tri":
-        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} tri ${PRES} ${PRES} ${TAU_P}\n"
-    elif ens == "nve":
-        ret += "fix             1 all nve\n"
+    if is_spin:
+        if ens == "nvt":
+            ret += "fix             1 all nvt temp ${TEMP} ${TEMP} ${TAU_T} mass ${SP_MASS} rand %d\n" % (
+                rng.integers(1, 2**16)
+            )
+        elif ens == "npt-iso" or ens == "npt":
+            ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} iso ${PRES} ${PRES} ${TAU_P} mass ${SP_MASS} rand %d\n" % (
+                rng.integers(1, 2**16)
+            )
+        elif ens == "npt-aniso":
+            ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} aniso ${PRES} ${PRES} ${TAU_P} mass ${SP_MASS} rand %d\n" % (
+                rng.integers(1, 2**16)
+            )
+        elif ens == "npt-tri":
+            ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} tri ${PRES} ${PRES} ${TAU_P} mass ${SP_MASS} rand %d\n" % (
+                rng.integers(1, 2**16)
+            )
+        elif ens == "nvt-langevin":
+            ret += "fix             1 all nve/spin lattice_flag %d spin_flag %d\n" % (
+                lattice_flag, spin_flag
+            )
+            if lattice_flag:
+                ret += "fix             2 all langevin ${TEMP} ${TEMP} ${TAU_T} %d zero no\n" % (
+                    rng.integers(1, 2**16)
+                )
+            if spin_flag:
+                ret += "fix             3 all langevin/spin ${TEMP} ${TEMP} ${TAU_T} %d zero yes\n" % (
+                    rng.integers(1, 2**16)
+                )
+        elif ens == "nve":
+            ret += "fix             1 all nve/spin lattice_flag %d spin_flag %d\n" % (
+                lattice_flag, spin_flag
+            )
+        else:
+            raise RuntimeError(f"unknown ensemble {ens} for spin system\n")
     else:
-        raise RuntimeError(f"unknow ensemble {ens}\n")
+        if ens == "nvt":
+            ret += "fix             1 all nvt temp ${TEMP} ${TEMP} ${TAU_T}\n"
+        elif ens == "npt-iso" or ens == "npt":
+            ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} iso ${PRES} ${PRES} ${TAU_P}\n"
+        elif ens == "npt-xy":
+            ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} aniso ${PRES} ${PRES} ${TAU_P} couple xy\n"
+        elif ens == "npt-aniso":
+            ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} aniso ${PRES} ${PRES} ${TAU_P}\n"
+        elif ens == "npt-tri":
+            ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} tri ${PRES} ${PRES} ${TAU_P}\n"
+        elif ens == "nve":
+            ret += "fix             1 all nve\n"
+        else:
+            raise RuntimeError(f"unknow ensemble {ens}\n")
     ret += "fix             mzero all momentum 10 linear 1 1 1\n"
     ret += "# --------------------- INITIALIZE -----------------------\n"
-    ret += "velocity        all create ${TEMP} %d\n" % (
-        np.random.default_rng().integers(1, 2**16)
-    )
+    if is_spin:
+        ret += "velocity        all create ${TEMP} %d spin yes spmass ${SP_MASS}\n" % (
+            rng.integers(1, 2**16)
+        )
+    else:
+        ret += "velocity        all create ${TEMP} %d\n" % (
+            rng.integers(1, 2**16)
+        )
     ret += "velocity        all zero linear\n"
     ret += "# --------------------- RUN ------------------------------\n"
     ret += "run             ${NSTEPS}\n"
@@ -183,6 +238,10 @@ def gen_equi_lammps_input(
     meam_model=None,
     custom_variables=None,
     append=None,
+    is_spin=False,
+    spin_mass=None,
+    lattice_flag=1,
+    spin_flag=1,
 ):
     if dump_freq is None:
         dump_freq = thermo_freq
@@ -197,14 +256,17 @@ def gen_equi_lammps_input(
         equi_conf=equi_conf,
         pres=pres,
         custom_variables=custom_variables,
+        is_spin=is_spin,
+        spin_mass=spin_mass,
     )
     equi_force_field = gen_equi_force_field(
-        model, if_meam=if_meam, meam_model=meam_model, append=append
+        model, if_meam=if_meam, meam_model=meam_model, append=append, is_spin=is_spin
     )
-    equi_thermo_settings = gen_equi_thermo_settings(timestep=timestep)
-    equi_dump_settings = gen_equi_dump_settings(if_dump_avg_posi=if_dump_avg_posi)
+    equi_thermo_settings = gen_equi_thermo_settings(timestep=timestep, is_spin=is_spin)
+    equi_dump_settings = gen_equi_dump_settings(if_dump_avg_posi=if_dump_avg_posi, is_spin=is_spin)
     equi_ensemble_settings = gen_equi_ensemble_settings(
-        ens=ens, if_dump_avg_posi=if_dump_avg_posi
+        ens=ens, if_dump_avg_posi=if_dump_avg_posi,
+        is_spin=is_spin, lattice_flag=lattice_flag, spin_flag=spin_flag,
     )
 
     equi_lammps_input = (
@@ -383,6 +445,10 @@ def make_task(
         Argument("is_water", bool, optional=True, default=False, alias=["if_water"]),
         Argument("if_meam", bool, optional=True, default=False),
         Argument("meam_model", list, optional=True, default=False),
+        Argument("is_spin", bool, optional=True, default=False),
+        Argument("spin_mass", float, optional=True, default=None),
+        Argument("lattice_flag", int, optional=True, default=1),
+        Argument("spin_flag", int, optional=True, default=1),
     ]
 
     equi_format = Argument("equi", dict, equi_args)
@@ -447,6 +513,10 @@ def make_task(
         meam_model=equi_settings["meam_model"],
         custom_variables=equi_settings.get("custom_variables", None),
         append=equi_settings.get("append", None),
+        is_spin=equi_settings.get("is_spin", False),
+        spin_mass=equi_settings.get("spin_mass", None),
+        lattice_flag=equi_settings.get("lattice_flag", 1),
+        spin_flag=equi_settings.get("spin_flag", 1),
     )
 
     with open(os.path.join(task_abs_dir, "in.lammps"), "w") as fp:

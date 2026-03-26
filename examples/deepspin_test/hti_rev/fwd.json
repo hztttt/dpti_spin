@@ -1,0 +1,23 @@
+{
+    "equi_conf": "../conf.lmp",
+    "model": "../frozen_model.pth",
+    "mass_map": [55.845],
+    "spin_mass_map": 0.01,
+    "spin_map": [1],
+    "spring_k": 0.02,
+    "spring_spin_k": 0.02,
+    "spring_lambda_mode": "split",
+    "crystal": "frenkel",
+    "lambda_deep_on":          [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    "lambda_spring_off":       [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    "lambda_spin_spring_off":  [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    "protect_eps": 1e-6,
+    "temp": 200,
+    "nsteps": 50000,
+    "timestep": 0.001,
+    "thermo_freq": 10,
+    "stat_skip": 5000,
+    "stat_bsize": 100,
+    "langevin": true,
+    "if_meam": false
+}

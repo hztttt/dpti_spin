@@ -1,0 +1,24 @@
+{
+    "equi_conf": "../conf.lmp",
+    "model": "../frozen_model.pth",
+    "mass_map": [
+        55.845
+    ],
+    "nsteps": 100000,
+    "timestep": 0.001,
+    "ens": "npt",
+    "temp": 200,
+    "pres": 0,
+    "tau_t": 0.1,
+    "tau_p": 1.0,
+    "thermo_freq": 10,
+    "dump_freq": 10000,
+    "stat_skip": 20000,
+    "stat_bsize": 100,
+    "if_dump_avg_posi": false,
+    "if_meam": false,
+    "is_spin": true,
+    "spin_mass": 0.01,
+    "lattice_flag": 1,
+    "spin_flag": 1
+}

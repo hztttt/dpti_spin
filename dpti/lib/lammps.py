@@ -12,6 +12,16 @@ def get_natoms(filename):
             return natoms
     raise RuntimeError("cannot find key word 'atoms' in " + filename)
 
+def get_nspins(filename, natoms):
+    with open(filename) as fp:
+        lines = [l for l in fp.read().splitlines() if l.strip()]
+    nspins = 0
+    if len(lines[-natoms].split()) < 9:
+        raise RuntimeError("the last natoms lines in " + filename + " should contain 9 columns at least")
+    for ii in lines[-natoms:]:
+        if int(ii.split()[-1]) != 0:
+            nspins += 1
+    return nspins
 
 def _is_n_number(inputs, nn):
     words = inputs.split()
