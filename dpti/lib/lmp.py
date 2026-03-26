@@ -185,16 +185,30 @@ def from_system_data(system):
         system["cell"][2][1],
     )
     ret += "\n"
-    ret += "Atoms # atomic\n"
-    ret += "\n"
-    for ii in range(natoms):
-        ret += "%d %d %.8f %.8f %.8f\n" % (
-            ii + 1,
-            system["atom_types"][ii],
-            system["coordinates"][ii][0] - system["orig"][0],
-            system["coordinates"][ii][1] - system["orig"][1],
-            system["coordinates"][ii][2] - system["orig"][2],
-        )
+    if "spins" in system:
+        ret += "Atoms # spin\n"
+        ret += "\n"
+        for ii in range(natoms):
+            sp, spx, spy, spz = system["spins"][ii]
+            ret += "%d %d %.8f %.8f %.8f %.8f %.8f %.8f %.8f\n" % (
+                ii + 1,
+                system["atom_types"][ii],
+                system["coordinates"][ii][0] - system["orig"][0],
+                system["coordinates"][ii][1] - system["orig"][1],
+                system["coordinates"][ii][2] - system["orig"][2],
+                spx, spy, spz, sp,
+            )
+    else:
+        ret += "Atoms # atomic\n"
+        ret += "\n"
+        for ii in range(natoms):
+            ret += "%d %d %.8f %.8f %.8f\n" % (
+                ii + 1,
+                system["atom_types"][ii],
+                system["coordinates"][ii][0] - system["orig"][0],
+                system["coordinates"][ii][1] - system["orig"][1],
+                system["coordinates"][ii][2] - system["orig"][2],
+            )
     return ret
 
 

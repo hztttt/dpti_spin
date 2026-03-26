@@ -81,6 +81,31 @@ def get_posi(lines):
     return posis[:, 1:4]
 
 
+def get_spin(lines):
+    blk, head = _get_block(lines, "ATOMS")
+    keys = head.split()
+    if "c_spin[1]" not in keys:
+        return None
+    id_idx = keys.index("id") - 2
+    sp_idx  = keys.index("c_spin[1]") - 2
+    spx_idx = keys.index("c_spin[2]") - 2
+    spy_idx = keys.index("c_spin[3]") - 2
+    spz_idx = keys.index("c_spin[4]") - 2
+    spins = []
+    for ii in blk:
+        words = ii.split()
+        spins.append([
+            float(words[id_idx]),
+            float(words[sp_idx]),
+            float(words[spx_idx]),
+            float(words[spy_idx]),
+            float(words[spz_idx]),
+        ])
+    spins.sort()
+    spins = np.array(spins)
+    return spins[:, 1:]  # sp, spx, spy, spz
+
+
 def get_dumpbox(lines):
     blk, h = _get_block(lines, "BOX BOUNDS")
     bounds = np.zeros([3, 2])
@@ -135,6 +160,9 @@ def system_data(lines):
     natoms = sum(system["atom_numbs"])
     system["atom_types"] = get_atype(lines)
     system["coordinates"] = get_posi(lines)
+    spins = get_spin(lines)
+    if spins is not None:
+        system["spins"] = spins
     return system
 
 
