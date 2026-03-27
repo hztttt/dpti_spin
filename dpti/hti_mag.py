@@ -622,7 +622,8 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
         copied_conf = os.path.join(os.path.abspath(iter_name), "conf.lmp")
         shutil.copyfile(equi_conf, copied_conf)
         jdata["equi_conf"] = "conf.lmp"
-        linked_model = os.path.join(os.path.abspath(iter_name), "graph.pb")
+        model_name = os.path.basename(model)
+        linked_model = os.path.join(os.path.abspath(iter_name), model_name)
 
         if if_meam:
             relative_link_file(meam_model["library"], job_abs_dir)
@@ -631,7 +632,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
             pass
 
         shutil.copyfile(model, linked_model)
-        jdata["model"] = "graph.pb"
+        jdata["model"] = model_name
         cwd = os.getcwd()
         os.chdir(iter_name)
         with open("in.json", "w") as fp:
@@ -821,15 +822,16 @@ def _make_tasks(
         os.symlink(os.path.relpath(equi_conf), "conf.lmp")
         os.chdir(cwd)
     jdata["equi_conf"] = "conf.lmp"
-    linked_model = os.path.join(os.path.abspath(iter_name), "graph.pb")
+    model_name = os.path.basename(model)
+    linked_model = os.path.join(os.path.abspath(iter_name), model_name)
     if not link:
         shutil.copyfile(model, linked_model)
     else:
         cwd = os.getcwd()
         os.chdir(iter_name)
-        os.symlink(os.path.relpath(model), "graph.pb")
+        os.symlink(os.path.relpath(model), model_name)
         os.chdir(cwd)
-    jdata["model"] = "graph.pb"
+    jdata["model"] = model_name
     langevin = jdata.get("langevin", True)
 
     cwd = os.getcwd()
@@ -843,7 +845,7 @@ def _make_tasks(
         create_path(work_path)
         os.chdir(work_path)
         os.symlink(os.path.relpath(copied_conf), "conf.lmp")
-        os.symlink(os.path.relpath(linked_model), "graph.pb")
+        os.symlink(os.path.relpath(linked_model), model_name)
         if if_meam:
             meam_library_basename = os.path.basename(meam_model["library"])
             meam_potential_basename = os.path.basename(meam_model["potential"])
@@ -876,7 +878,7 @@ def _make_tasks(
                 mass_map,
                 spin_mass,
                 ii,
-                "graph.pb",
+                model_name,
                 m_spring_k,
                 m_spring_spin_k,
                 nsteps,

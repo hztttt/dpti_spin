@@ -1,6 +1,6 @@
 import argparse
 
-from . import equi, gdi, hti, hti_ice, hti_liq, hti_water, mti, ti, ti_water, hti_mag
+from . import equi, gdi, hti, hti_ice, hti_liq, hti_water, mti, ti, ti_water, hti_mag, ti_mag
 
 # from . import gdi
 
@@ -20,6 +20,7 @@ def create_parser():
     equi.add_module_subparsers(main_subparsers)
     hti.add_module_subparsers(main_subparsers)
     hti_mag.add_module_subparsers(main_subparsers)
+    ti_mag.add_module_subparsers(main_subparsers)
     hti_liq.add_module_subparsers(main_subparsers)
     hti_ice.add_module_subparsers(main_subparsers)
     hti_water.add_module_subparsers(main_subparsers)

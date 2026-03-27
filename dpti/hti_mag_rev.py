@@ -318,7 +318,8 @@ def _make_tasks_rev(
 
     # Copy/link conf and model into iter_name
     copied_conf  = os.path.join(os.path.abspath(iter_name), "conf.lmp")
-    linked_model = os.path.join(os.path.abspath(iter_name), "graph.pb")
+    model_name   = os.path.basename(model)
+    linked_model = os.path.join(os.path.abspath(iter_name), model_name)
     if not link:
         shutil.copyfile(equi_conf, copied_conf)
         shutil.copyfile(model,     linked_model)
@@ -326,12 +327,12 @@ def _make_tasks_rev(
         cwd = os.getcwd()
         os.chdir(iter_name)
         os.symlink(os.path.relpath(equi_conf), "conf.lmp")
-        os.symlink(os.path.relpath(model),     "graph.pb")
+        os.symlink(os.path.relpath(model),     model_name)
         os.chdir(cwd)
 
     jdata_task = dict(jdata)
     jdata_task["equi_conf"] = "conf.lmp"
-    jdata_task["model"]     = "graph.pb"
+    jdata_task["model"]     = model_name
     cwd = os.getcwd()
     os.chdir(iter_name)
     with open("in.json", "w") as fp:
@@ -343,7 +344,7 @@ def _make_tasks_rev(
         create_path(work_path)
         os.chdir(work_path)
         os.symlink(os.path.relpath(copied_conf),  "conf.lmp")
-        os.symlink(os.path.relpath(linked_model), "graph.pb")
+        os.symlink(os.path.relpath(linked_model), model_name)
 
         ens = "nvt-langevin" if (langevin or idx == 0) else "nvt"
 
@@ -352,7 +353,7 @@ def _make_tasks_rev(
             mass_map,
             spin_mass,
             lamb,
-            "graph.pb",
+            model_name,
             m_spring_k,
             m_spring_spin_k,
             nsteps,
@@ -380,11 +381,12 @@ def make_tasks_rev(iter_name, jdata, ref="einstein"):
 
     job_abs_dir  = create_path(iter_name)
     copied_conf  = os.path.join(os.path.abspath(iter_name), "conf.lmp")
-    linked_model = os.path.join(os.path.abspath(iter_name), "graph.pb")
+    model_name   = os.path.basename(model)
+    linked_model = os.path.join(os.path.abspath(iter_name), model_name)
     shutil.copyfile(equi_conf, copied_conf)
     shutil.copyfile(model,     linked_model)
     jdata["equi_conf"] = "conf.lmp"
-    jdata["model"]     = "graph.pb"
+    jdata["model"]     = model_name
 
     cwd = os.getcwd()
     os.chdir(iter_name)
