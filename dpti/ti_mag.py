@@ -114,7 +114,7 @@ def _gen_lammps_input(
     ret += "dump            1 all custom ${DUMP_FREQ} traj.dump id type x y z vx vy vz c_spin[1] c_spin[2] c_spin[3] c_spin[4]\n"
     # ----- ensemble / thermostat -----
     if ens == "nvt":
-        ret += "fix             1 all nvt temp ${TEMP} ${TEMP} ${TAU_T} mass ${SP_MASS} rand %d lattice_flag %d spin_flag %d\n" % (
+        ret += "fix             1 all nvt temp ${TEMP} ${TEMP} ${TAU_T} mass ${SP_MASS} rand %d lattice %d spin %d\n" % (
             np.random.default_rng().integers(1, 2**16),
             lattice_flag,
             spin_flag
@@ -128,23 +128,23 @@ def _gen_lammps_input(
                 np.random.default_rng().integers(1, 2**16)
             )
         if spin_flag:
-            ret += "fix             3 all langevin/spin ${TEMP} ${TEMP} ${TAU_T} %d zero yes\n" % (
+            ret += "fix             3 all langevin/spin ${TEMP} ${TEMP} ${TAU_T} %d\n" % (
                 np.random.default_rng().integers(1, 2**16)
             )
     elif ens in ("npt-iso", "npt"):
-        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} iso ${PRES} ${PRES} ${TAU_P} mass ${SP_MASS} rand %d lattice_flag %d spin_flag %d\n" % (
+        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} iso ${PRES} ${PRES} ${TAU_P} mass ${SP_MASS} rand %d lattice %d spin %d\n" % (
             np.random.default_rng().integers(1, 2**16),
             lattice_flag,
             spin_flag
         )
     elif ens == "npt-aniso":
-        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} aniso ${PRES} ${PRES} ${TAU_P} mass ${SP_MASS} rand %d lattice_flag %d spin_flag %d \n" % (
+        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} aniso ${PRES} ${PRES} ${TAU_P} mass ${SP_MASS} rand %d lattice %d spin %d \n" % (
             np.random.default_rng().integers(1, 2**16),
             lattice_flag,
             spin_flag
         )
     elif ens == "npt-tri":
-        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} tri ${PRES} ${PRES} ${TAU_P} mass ${SP_MASS} rand %d lattice_flag %d spin_flag %d\n" % (
+        ret += "fix             1 all npt temp ${TEMP} ${TEMP} ${TAU_T} tri ${PRES} ${PRES} ${TAU_P} mass ${SP_MASS} rand %d lattice %d spin %d\n" % (
             np.random.default_rng().integers(1, 2**16),
             lattice_flag,
             spin_flag

@@ -551,7 +551,7 @@ def _gen_lammps_input(
             else:
                 ret += " zero no\n"
         if spin_flag:
-            ret += "fix             3 all langevin/spin ${TEMP} ${TEMP} ${TAU_T} %d zero yes\n" % (
+            ret += "fix             3 all langevin/spin ${TEMP} ${TEMP} ${TAU_T} %d\n" % (
                 np.random.default_rng().integers(1, 2**16)
             )
     elif ens == "npt-iso" or ens == "npt":
