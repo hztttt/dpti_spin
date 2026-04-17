@@ -277,33 +277,15 @@ def magnetic_frenkel(job):
         sum_m += mass_map[idx] * ii
         if spin_map[idx]:
              # magentic contributions.
-             sfe += 3.0 * ii * np.log(Lambda_S_ref[idx])
-             sfe += 3.0 * ii * np.log(Lambda_S_kin[idx])
+            sfe += 3.0 * ii * np.log(Lambda_S_ref[idx])
+            # K_spin_zero = spring_spin_k * spin_mass * sum_m
+            # sfe -= 3.0 * np.log(compute_spin_spring(temp, K_spin_zero))
+            if include_spin_kinetic:
+                sfe += 3.0 * ii * np.log(Lambda_S_kin[idx])
 
     fe -= 3.0 * np.log(Lambda_E_cm)
     fe -= 1.5 * np.log(sum_m)
     fe += np.log(total_atoms / (vol * (pc.angstrom**3)))
-
-    # if spin_model == "tspin":
-    #     fe += 3.0 * total_atoms * np.log(Lambda_S_ref)
-    # else:
-    #     kbt_ev = pc.Boltzmann * temp / pc.electron_volt
-    #     beta_ev = 1.0 / kbt_ev
-    #     if spin_spring_k <= 0.0:
-    #         raise ValueError("spin_spring_k must be positive for llg model")
-    #     spin_factor = (2.0 * np.pi * kbt_ev / spin_spring_k) * (
-    #         1.0 - np.exp(-2.0 * beta_ev * spin_spring_k)
-    #     )
-    #     fe -= total_atoms * np.log(spin_factor)
-
-    if include_spin_kinetic:
-        if spin_mass is None:
-            raise ValueError(
-                "include_spin_kinetic=True requires `spin_mass` in in.json"
-            )
-        # Lambda_S_kin = compute_spin_lambda(temp, float(spin_mass), h_s)
-        # Lambda_S_kin = [compute_spin_lambda(temp, ii * spin_mass) for ii in mass_map]
-        # fe += 3.0 * total_atoms * np.log(Lambda_S_kin)
 
     fe *= pc.Boltzmann * temp / pc.electron_volt
     fe /= total_atoms

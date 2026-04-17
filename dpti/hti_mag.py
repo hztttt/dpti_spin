@@ -1352,7 +1352,7 @@ def compute_task(
     if "reference" not in jdata:
         jdata["reference"] = "einstein"
     spin_like = any(
-        key in jdata for key in ["spin_spring_k", "s_spring_k", "spring_k_spin", "spin_model", "spin_mu"]
+        key in jdata for key in ["spin_spring_k", "spring_spin_k", "s_spring_k", "spring_k_spin", "spin_model", "spin_mu", "lambda_spin_spring_off"]
     )
 
     if jdata["crystal"] == "vega":
