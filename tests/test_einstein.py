@@ -1,7 +1,18 @@
+import os
 import unittest
 
+import numpy as np
+import scipy.constants as pc
+from scipy.integrate import quad
+
 # from numpy.testing import assert_almost_equal
-from dpti.einstein import free_energy, frenkel, ideal_gas_fe
+from dpti.einstein import (
+    free_energy,
+    frenkel,
+    ideal_gas_fe,
+    spin_ref_fe_per_atom,
+    spin_ref_partition,
+)
 
 lambda_seq = [
     "0.00:0.05:0.010",
@@ -12,23 +23,26 @@ lambda_seq = [
 ]
 
 
+_HTI_TEST_FILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hti_test_files")
+
+
 class TestEinstein(unittest.TestCase):
     def setUp(self):
         self.maxDiff = None
 
     def test_frenkel(self):
         fe1 = -0.14061204010964043
-        fe2 = frenkel("hti_test_files/frenkel")
+        fe2 = frenkel(os.path.join(_HTI_TEST_FILES, "frenkel"))
         self.assertAlmostEqual(fe1, fe2)
 
     def test_vega(self):
         fe1 = -0.13882760104909486
-        fe2 = free_energy("hti_test_files/vega")
+        fe2 = free_energy(os.path.join(_HTI_TEST_FILES, "vega"))
         self.assertAlmostEqual(fe1, fe2)
 
     def test_ideal(self):
         fe1 = -1.8983591660560315
-        fe2 = ideal_gas_fe("hti_test_files/ideal")
+        fe2 = ideal_gas_fe(os.path.join(_HTI_TEST_FILES, "ideal"))
         # print('ideal_gas fe', fe2)
         self.assertAlmostEqual(fe1, fe2)
 
@@ -92,6 +106,51 @@ class TestEinstein(unittest.TestCase):
 #         self.assertAlmostEqual(stt_err1, stt_err2, places=8)
 #         self.assertAlmostEqual(sys_err2, sys_err2, places=8)
 
+
+class TestSpinRefFreeEnergy(unittest.TestCase):
+    def test_partition_matches_direct_quadrature(self):
+        temp = 2000.0
+        k = 1.0
+        s0 = 2.5
+        beta = 1.0 / (pc.Boltzmann / pc.electron_volt * temp)
+
+        expected, _ = quad(
+            lambda s: 4.0 * np.pi * s * s * np.exp(-0.5 * beta * k * (s - s0) ** 2),
+            0.0,
+            np.inf,
+            epsabs=0.0,
+            epsrel=1.0e-11,
+            limit=200,
+        )
+        self.assertAlmostEqual(spin_ref_partition(k, s0, beta), expected, places=10)
+
+    def test_partition_s0_zero_limit(self):
+        temp = 500.0
+        k = 0.7
+        beta = 1.0 / (pc.Boltzmann / pc.electron_volt * temp)
+        a = 0.5 * beta * k
+        expected = np.pi ** 1.5 / a ** 1.5
+        self.assertAlmostEqual(spin_ref_partition(k, 0.0, beta), expected, places=12)
+
+    def test_fe_per_atom_weighted_by_spin_types(self):
+        temp = 2000.0
+        atom_numbs = [2, 1, 3]
+        spin_map = [1, 0, 1]
+        spin_ref = {
+            "style": "spring",
+            "k": [0.7, 99.0, 1.0],
+            "s0": [2.0, 99.0, 2.5],
+        }
+        kbt = pc.Boltzmann / pc.electron_volt * temp
+        beta = 1.0 / kbt
+        f0 = -kbt * np.log(spin_ref_partition(0.7, 2.0, beta))
+        f2 = -kbt * np.log(spin_ref_partition(1.0, 2.5, beta))
+        expected = (2.0 * f0 + 3.0 * f2) / 6.0
+        self.assertAlmostEqual(
+            spin_ref_fe_per_atom(temp, atom_numbs, spin_map, spin_ref),
+            expected,
+            places=12,
+        )
 
 if __name__ == "__main__":
     unittest.main()

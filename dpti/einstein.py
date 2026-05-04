@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import os
 
 import numpy as np
@@ -46,6 +47,51 @@ def compute_spin_spring(temp, spin_spring_k):
 def compute_spin_lambda(temp, spin_mu, h_s=pc.Planck):
     ret = 2.0 * np.pi * spin_mu * (1e-3 / pc.Avogadro) * pc.Boltzmann * temp / (h_s * h_s)
     return 1.0 / np.sqrt(ret)
+
+
+def _expand_type_param(value, ntypes, name):
+    if isinstance(value, (list, tuple)):
+        if len(value) != ntypes:
+            raise ValueError(f"{name} length {len(value)} does not match ntypes {ntypes}")
+        return [float(v) for v in value]
+    return [float(value) for _ in range(ntypes)]
+
+
+def spin_ref_partition(k, s0, beta):
+    """Configurational partition function for 1/2 k (|S|-S0)^2."""
+    if k <= 0.0:
+        raise ValueError("spin_ref.k must be positive for harmonic spin reference")
+    a = 0.5 * beta * k
+    x = math.sqrt(a) * s0
+    erf_term = 1.0 + math.erf(x)
+    exp_term = math.exp(-a * s0 * s0)
+    return (
+        (math.pi ** 1.5) / (a ** 1.5) * (1.0 + 2.0 * a * s0 * s0) * erf_term
+        + 2.0 * math.pi * s0 / a * exp_term
+    )
+
+
+def spin_ref_fe_per_atom(temp, atom_numbs, spin_map, spin_ref):
+    style = str(spin_ref.get("style", "spring")).lower()
+    if style not in ("spring", "harmonic"):
+        return 0.0
+
+    ntypes = len(atom_numbs)
+    k_by_type = _expand_type_param(spin_ref.get("k", 0.0), ntypes, "spin_ref.k")
+    s0_by_type = _expand_type_param(spin_ref.get("s0", 0.0), ntypes, "spin_ref.s0")
+    natoms = sum(atom_numbs)
+    if natoms <= 0:
+        return 0.0
+
+    kbt = pc.Boltzmann / pc.electron_volt * temp
+    beta = 1.0 / kbt
+    fe = 0.0
+    for count, is_spin, k, s0 in zip(atom_numbs, spin_map, k_by_type, s0_by_type):
+        if not is_spin or count == 0:
+            continue
+        z_spin = spin_ref_partition(k, s0, beta)
+        fe += (count / natoms) * (-kbt * np.log(z_spin))
+    return float(fe)
 
 
 def ideal_gas_fe(job):
