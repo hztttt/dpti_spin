@@ -12,7 +12,12 @@ import scipy.constants as pc
 # sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../'))
 from dpdispatcher import Machine, Resources, Submission, Task
 
-from dpti.einstein import free_energy, frenkel, magnetic_frenkel
+from dpti.einstein import (
+    free_energy,
+    frenkel,
+    magnetic_frenkel,
+    magnetic_frenkel_modulus,
+)
 from dpti.lib.lammps import get_natoms, get_thermo, get_nspins
 
 # from lib.utils import integrate_sys_err
@@ -53,6 +58,84 @@ def _get_spring_lambda_mode(jdata):
             )
         )
     return aliases[spring_lambda_mode]
+
+
+def _get_spin_reference_mode(jdata):
+    spin_reference = jdata.get("spin_reference")
+    if spin_reference is None:
+        if "spin_ref" in jdata:
+            spin_reference = "modulus"
+        elif any(
+            key in jdata
+            for key in [
+                "spin_spring_k",
+                "spring_spin_k",
+                "s_spring_k",
+                "spring_k_spin",
+                "lambda_spin_spring_off",
+                "spin_model",
+                "spin_mu",
+            ]
+        ):
+            spin_reference = "vector"
+        else:
+            spin_reference = "none"
+
+    aliases = {
+        "vector": "vector",
+        "spin": "vector",
+        "spring": "vector",
+        "spin_spring": "vector",
+        "spin-spring": "vector",
+        "modulus": "modulus",
+        "mod": "modulus",
+        "spin_mod": "modulus",
+        "spin-mod": "modulus",
+        "spin_modulus": "modulus",
+        "spin-modulus": "modulus",
+        "none": "none",
+        "no": "none",
+        "false": "none",
+    }
+    key = str(spin_reference).lower()
+    if key not in aliases:
+        raise RuntimeError(
+            "unknown spin_reference '{}', expected one of: {}".format(
+                spin_reference,
+                ", ".join(sorted(set(aliases.keys()))),
+            )
+        )
+    return aliases[key]
+
+
+def _expand_type_param(value, ntypes, name):
+    if isinstance(value, (list, tuple)):
+        if len(value) != ntypes:
+            raise ValueError(f"{name} length {len(value)} does not match ntypes {ntypes}")
+        return [float(v) for v in value]
+    return [float(value) for _ in range(ntypes)]
+
+
+def _get_spin_ref_params(jdata, mass_map, spin_mass, spin_map):
+    ntypes = len(mass_map)
+    spin_ref = jdata.get("spin_ref")
+    if spin_ref is not None:
+        style = spin_ref.get("style", "spring")
+        k_by_type = _expand_type_param(spin_ref.get("k", 0.0), ntypes, "spin_ref.k")
+        s0_by_type = _expand_type_param(spin_ref.get("s0", 0.0), ntypes, "spin_ref.s0")
+    else:
+        style = jdata.get("spin_mod_style", "spring")
+        spin_mod_k = jdata.get("spin_mod_k", 0.0)
+        base_k = _expand_type_param(spin_mod_k, ntypes, "spin_mod_k")
+        k_by_type = [base_k[i] * mass_map[i] * spin_mass for i in range(ntypes)]
+        s0_by_type = _expand_type_param(jdata.get("spin_mod_s0", 0.0), ntypes, "spin_mod_s0")
+
+    style = str(style).lower()
+    if style not in ("spring", "harmonic"):
+        raise RuntimeError("hti_mag spin_reference='modulus' supports only spring/harmonic spin_ref")
+
+    k_by_type = [k_by_type[i] if spin_map[i] else 0.0 for i in range(ntypes)]
+    return style, k_by_type, s0_by_type
 
 
 def _ff_lj_on(lamb, model, sparam):
@@ -303,6 +386,37 @@ def _ff_spring_spin(lamb, m_spring_spin_k, var_spring, enabled=True):
     ret += f"variable        l_spring_spin equal {sum_str}\n"
     return ret
 
+
+def _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode, enabled=True):
+    ret = ""
+    if not enabled:
+        ret += "variable        l_spring_spin equal 0.0\n"
+        return ret
+
+    if mode == "full":
+        factor = 1.0
+    elif mode == "off":
+        factor = 1.0 - lamb
+    else:
+        raise RuntimeError("unknown spin_mod mode", mode)
+
+    ntypes = len(m_spring_spin_k)
+    spin_types = [ii for ii in range(ntypes) if spin_map[ii]]
+    if not spin_types or factor <= 0.0:
+        ret += "variable        l_spring_spin equal 0.0\n"
+        return ret
+
+    for ii in spin_types:
+        ret += f"group           type_{ii + 1} type {ii + 1}\n"
+    for ii in spin_types:
+        m_spring_const = m_spring_spin_k[ii] * factor
+        ret += f"fix             l_spring_spin_{ii + 1} type_{ii + 1} spring/spin/mod {m_spring_const:.10e} {spin_ref_s0[ii]:.10e}\n"
+        ret += "fix_modify      l_spring_spin_%s energy yes\n" % (ii + 1)
+    sum_str = "+".join("f_l_spring_spin_%s" % (ii + 1) for ii in spin_types)
+    ret += f"variable        l_spring_spin equal {sum_str}\n"
+    return ret
+
+
 def _ff_soft_lj(
     lamb, model, m_spring_k, step, sparam, if_meam=False, meam_model=None, append=None
 ):
@@ -337,14 +451,24 @@ def _ff_two_steps(
     m_spring_k,
     m_spring_spin_k,
     step,
+    spin_ref_s0=None,
+    spin_map=None,
+    spin_reference="vector",
     append=None,
     if_meam=False,
     meam_model=None,
     spring_lambda_mode="joint",
+    if_harmonic=False,
+    m_target_spring_k=None,
+    m_target_spring_spin_k=None,
 ):
     ret = ""
     ret += "# --------------------- FORCE FIELDS ---------------------\n"
-    if if_meam:
+    if if_harmonic:
+        # harmonic (Einstein crystal only): zero pair potential for validation
+        ret += "pair_style      zero 10.0\n"
+        ret += "pair_coeff      * *\n"
+    elif if_meam:
         ret += "pair_style      meam\n"
         ret += f'pair_coeff      * * {meam_model["library"]} {meam_model["element"]} {meam_model["potential"]} {meam_model["element"]}\n'
     else:
@@ -404,19 +528,53 @@ def _ff_two_steps(
     #  var_lattice = False; var_spin = True;
     #  enable_lattice = False; enable_spin = True;
     ret += _ff_spring(lamb, m_spring_k, var_lattice_spring, enabled=enable_lattice_spring)
-    ret += _ff_spring_spin(
-        lamb,
-        m_spring_spin_k,
-        var_spin_spring,
-        enabled=enable_spin_spring,
-    )
+    if spin_reference == "vector":
+        ret += _ff_spring_spin(
+            lamb,
+            m_spring_spin_k,
+            var_spin_spring,
+            enabled=enable_spin_spring,
+        )
+    elif spin_reference == "modulus":
+        if spin_ref_s0 is None or spin_map is None:
+            raise RuntimeError("spin_reference='modulus' requires spin_ref_s0 and spin_map")
+        spin_mod_mode = "off" if var_spin_spring else "full"
+        ret += _ff_spin_mod(
+            lamb,
+            m_spring_spin_k,
+            spin_ref_s0,
+            spin_map,
+            spin_mod_mode,
+            enabled=enable_spin_spring,
+        )
+    elif spin_reference == "none":
+        ret += "variable        l_spring_spin equal 0.0\n"
+    else:
+        raise RuntimeError("unknown spin_reference", spin_reference)
 
-    if var_deep:
-        if if_meam:
-            ret += "fix             l_deep all adapt 1 pair meam scale * * v_LAMBDA\n"
-        else:
-            ret += "fix             l_deep all adapt 1 pair deepspin scale * * v_LAMBDA\n"
-    ret += "compute         e_deep all pe pair\n"
+    if if_harmonic:
+        # target lattice springs (k2): scale by lambda in deep_on, full strength otherwise
+        ntypes = len(m_target_spring_k)
+        for ii in range(ntypes):
+            k2_const = m_target_spring_k[ii] * lamb if var_deep else m_target_spring_k[ii]
+            ret += f"fix             l_k2_spring_{ii+1} type_{ii+1} spring/self {k2_const:.10e}\n"
+            ret += f"fix_modify      l_k2_spring_{ii+1} energy yes\n"
+        # target spin springs (k2_spin): scale by lambda in deep_on, full strength otherwise
+        for ii in range(ntypes):
+            k2_spin_const = m_target_spring_spin_k[ii] * lamb if var_deep else m_target_spring_spin_k[ii]
+            ret += f"fix             l_k2_spring_spin_{ii+1} type_{ii+1} spring/spin {k2_spin_const:.10e}\n"
+            ret += f"fix_modify      l_k2_spring_spin_{ii+1} energy yes\n"
+        sum_str = "+".join(
+            [f"f_l_k2_spring_{ii+1}+f_l_k2_spring_spin_{ii+1}" for ii in range(ntypes)]
+        )
+        ret += f"variable        e_k2_spring equal {sum_str}\n"
+    else:
+        if var_deep:
+            if if_meam:
+                ret += "fix             l_deep all adapt 1 pair meam scale * * v_LAMBDA\n"
+            else:
+                ret += "fix             l_deep all adapt 1 pair deepspin scale * * v_LAMBDA\n"
+        ret += "compute         e_deep all pe pair\n"
     ret += "compute         spin all property/atom sp spx spy spz fmx fmy fmz\n"
     return ret
 
@@ -433,6 +591,9 @@ def _gen_lammps_input(
     timestep,
     ens,
     temp,
+    spin_ref_s0=None,
+    spin_map=None,
+    spin_reference="vector",
     pres=1.0,
     tau_t=0.1,
     tau_p=0.5,
@@ -450,6 +611,9 @@ def _gen_lammps_input(
     spring_lambda_mode="joint",
     lattice_flag=1,
     spin_flag=1,
+    if_harmonic=False,
+    m_target_spring_k=None,
+    m_target_spring_spin_k=None,
 ):
     ret = ""
     ret += "clear\n"
@@ -488,10 +652,16 @@ def _gen_lammps_input(
             m_spring_k,
             m_spring_spin_k,
             step,
+            spin_ref_s0=spin_ref_s0,
+            spin_map=spin_map,
+            spin_reference=spin_reference,
             append=append,
             if_meam=if_meam,
             meam_model=meam_model,
             spring_lambda_mode=spring_lambda_mode,
+            if_harmonic=if_harmonic,
+            m_target_spring_k=m_target_spring_k,
+            m_target_spring_spin_k=m_target_spring_spin_k,
         )
     elif switch == "three-step":
         ret += _ff_soft_lj(
@@ -513,22 +683,27 @@ def _gen_lammps_input(
     ret += "thermo          ${THERMO_FREQ}\n"
     ret += "compute         allmsd all msd\n"
     ret += "compute         spinmsd all msd/spin\n"
+    spin_msd_col = "c_spinmsd[*]"
+    if spin_reference == "modulus":
+        ret += "compute         spinmodmsd all msd/spin/mod\n"
+        spin_msd_col += " c_spinmodmsd"
+    e_deep_col = "v_e_k2_spring" if if_harmonic else "c_e_deep"
     if 1 - lamb != 0:
         if not isinstance(m_spring_k, list):
             if switch == "three-step":
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_diff[1] f_l_spring_spin c_allmsd[*] c_spinmsd[*]\n"
+                ret += f"thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_diff[1] f_l_spring_spin c_allmsd[*] {spin_msd_col}\n"
             else:
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_deep f_l_spring_spin c_allmsd[*] c_spinmsd[*]\n"
+                ret += f"thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring {e_deep_col} f_l_spring_spin c_allmsd[*] {spin_msd_col}\n"
         else:
             if switch == "three-step":
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_diff[1] v_l_spring_spin c_allmsd[*] c_spinmsd[*]\n"
+                ret += f"thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_diff[1] v_l_spring_spin c_allmsd[*] {spin_msd_col}\n"
             else:
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_deep v_l_spring_spin c_allmsd[*] c_spinmsd[*]\n"
+                ret += f"thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring {e_deep_col} v_l_spring_spin c_allmsd[*] {spin_msd_col}\n"
     else:
         if switch == "three-step":
-            ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_diff[1] c_e_diff[1] c_allmsd[*] c_spinmsd[*]\n"
+            ret += f"thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_diff[1] c_e_diff[1] c_allmsd[*] {spin_msd_col}\n"
         else:
-            ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_deep c_e_deep c_allmsd[*] c_spinmsd[*]\n"
+            ret += f"thermo_style    custom step ke pe etotal enthalpy temp press vol {e_deep_col} {e_deep_col} c_allmsd[*] {spin_msd_col}\n"
     ret += "thermo_modify   format 9 %.16e\n"
     ret += "thermo_modify   format 10 %.16e\n"
     ret += "thermo_modify   format 11 %.16e\n"
@@ -594,9 +769,11 @@ def _gen_lammps_input(
 def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None):
     if if_meam is None:
         if_meam = jdata.get("if_meam", False)
+    if_harmonic = jdata.get("harmonic", False)
     equi_conf = os.path.abspath(jdata["equi_conf"])
     meam_model = jdata.get("meam_model", None)
-    model = os.path.abspath(jdata["model"])
+    if not if_harmonic:
+        model = os.path.abspath(jdata["model"])
 
     if if_meam is None:
         if_meam = jdata.get("if_meam", None)
@@ -611,6 +788,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
             step="both",
             if_meam=if_meam,
             meam_model=meam_model,
+            if_harmonic=if_harmonic,
         )
         if if_meam:
             relative_link_file(meam_model["library"], iter_name)
@@ -622,17 +800,17 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
         copied_conf = os.path.join(os.path.abspath(iter_name), "conf.lmp")
         shutil.copyfile(equi_conf, copied_conf)
         jdata["equi_conf"] = "conf.lmp"
-        model_name = os.path.basename(model)
-        linked_model = os.path.join(os.path.abspath(iter_name), model_name)
 
         if if_meam:
             relative_link_file(meam_model["library"], job_abs_dir)
             relative_link_file(meam_model["potential"], job_abs_dir)
-        else:
-            pass
 
-        shutil.copyfile(model, linked_model)
-        jdata["model"] = model_name
+        if not if_harmonic:
+            model_name = os.path.basename(model)
+            linked_model = os.path.join(os.path.abspath(iter_name), model_name)
+            shutil.copyfile(model, linked_model)
+            jdata["model"] = model_name
+
         cwd = os.getcwd()
         os.chdir(iter_name)
         with open("in.json", "w") as fp:
@@ -648,6 +826,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                 link=True,
                 if_meam=if_meam,
                 meam_model=meam_model,
+                if_harmonic=if_harmonic,
             )
             if spring_lambda_mode == "joint":
                 subtask_name = "01.spring_off"
@@ -660,6 +839,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                     link=True,
                     if_meam=if_meam,
                     meam_model=meam_model,
+                    if_harmonic=if_harmonic,
                 )
             elif spring_lambda_mode == "split":
                 subtask_name = "01.spring_off"
@@ -672,6 +852,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                     link=True,
                     if_meam=if_meam,
                     meam_model=meam_model,
+                    if_harmonic=if_harmonic,
                 )
                 subtask_name = "02.spin_spring_off"
                 _make_tasks(
@@ -683,6 +864,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                     link=True,
                     if_meam=if_meam,
                     meam_model=meam_model,
+                    if_harmonic=if_harmonic,
                 )
             elif spring_lambda_mode == "lattice_only":
                 subtask_name = "01.lattice_spring_off"
@@ -695,6 +877,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                     link=True,
                     if_meam=if_meam,
                     meam_model=meam_model,
+                    if_harmonic=if_harmonic,
                 )
             elif spring_lambda_mode == "spin_only":
                 subtask_name = "01.spin_spring_off"
@@ -707,6 +890,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                     link=True,
                     if_meam=if_meam,
                     meam_model=meam_model,
+                    if_harmonic=if_harmonic,
                 )
             else:
                 raise RuntimeError("unknown spring_lambda_mode", spring_lambda_mode)
@@ -726,6 +910,7 @@ def _make_tasks(
     link=False,
     if_meam=False,
     meam_model=None,
+    if_harmonic=False,
 ):
     if "crystal" not in jdata:
         print("do not find crystal in jdata, assume vega")
@@ -775,17 +960,30 @@ def _make_tasks(
 
     equi_conf = jdata["equi_conf"]
     equi_conf = os.path.abspath(equi_conf)
-    model = jdata["model"]
-    model = os.path.abspath(model)
+    if not if_harmonic:
+        model = jdata["model"]
+        model = os.path.abspath(model)
+    else:
+        model = None
     # mass_map = jdata['mass_map']
     mass_map = get_first_matched_key_from_dict(jdata, ["mass_map", "model_mass_map"])
     spin_mass = get_first_matched_key_from_dict(jdata, ["spin_mass_map", "sp_mass_map", "spin_mass"])
+    spin_reference = _get_spin_reference_mode(jdata)
+    jdata["spin_reference"] = spin_reference
+    spin_map = None
+    spin_ref_s0 = None
+    if spin_reference == "modulus":
+        spin_map = get_first_matched_key_from_dict(jdata, ["spin_map", "sp_map"])
 
     nsteps = jdata["nsteps"]
     # timestep = jdata['timestep']
     timestep = get_first_matched_key_from_dict(jdata, ["timestep", "dt"])
     spring_k = jdata["spring_k"]
-    spring_spin_k = jdata["spring_spin_k"]
+    spring_spin_k = None
+    if spin_reference == "vector":
+        spring_spin_k = get_first_matched_key_from_dict(
+            jdata, ["spring_spin_k", "spin_spring_k", "s_spring_k", "spring_k_spin"]
+        )
     custom_variables = jdata.get("custom_variables", None)
     append = jdata.get("append", None)
 
@@ -794,11 +992,32 @@ def _make_tasks(
         m_spring_spin_k = []
         for ii in mass_map:
             m_spring_k.append(spring_k * ii)
-            m_spring_spin_k.append(spring_spin_k * ii * spin_mass) # ensure different spring for magnetic atoms. mark
+        if spin_reference == "vector":
+            for ii in mass_map:
+                m_spring_spin_k.append(spring_spin_k * ii * spin_mass) # ensure different spring for magnetic atoms. mark
+        elif spin_reference == "modulus":
+            _, m_spring_spin_k, spin_ref_s0 = _get_spin_ref_params(
+                jdata, mass_map, spin_mass, spin_map
+            )
+        else:
+            m_spring_spin_k = [0.0 for _ in mass_map]
     if crystal == "vega":
         m_spring_k = []
         for ii in mass_map:
             m_spring_k.append(spring_k * ii)
+        if spin_reference == "modulus":
+            _, m_spring_spin_k, spin_ref_s0 = _get_spin_ref_params(
+                jdata, mass_map, spin_mass, spin_map
+            )
+        else:
+            m_spring_spin_k = [0.0 for _ in mass_map]
+    m_target_spring_k = None
+    m_target_spring_spin_k = None
+    if if_harmonic:
+        target_spring_k = jdata["target_spring_k"]
+        target_spring_spin_k = jdata["target_spring_spin_k"]
+        m_target_spring_k = [target_spring_k * ii for ii in mass_map]
+        m_target_spring_spin_k = [target_spring_spin_k * ii * spin_mass for ii in mass_map]
     # thermo_freq = jdata['thermo_freq']
     thermo_freq = get_first_matched_key_from_dict(jdata, ["thermo_freq", "stat_freq"])
     dump_freq = get_first_matched_key_from_dict(
@@ -822,16 +1041,20 @@ def _make_tasks(
         os.symlink(os.path.relpath(equi_conf), "conf.lmp")
         os.chdir(cwd)
     jdata["equi_conf"] = "conf.lmp"
-    model_name = os.path.basename(model)
-    linked_model = os.path.join(os.path.abspath(iter_name), model_name)
-    if not link:
-        shutil.copyfile(model, linked_model)
+    if not if_harmonic:
+        model_name = os.path.basename(model)
+        linked_model = os.path.join(os.path.abspath(iter_name), model_name)
+        if not link:
+            shutil.copyfile(model, linked_model)
+        else:
+            cwd = os.getcwd()
+            os.chdir(iter_name)
+            os.symlink(os.path.relpath(model), model_name)
+            os.chdir(cwd)
+        jdata["model"] = model_name
     else:
-        cwd = os.getcwd()
-        os.chdir(iter_name)
-        os.symlink(os.path.relpath(model), model_name)
-        os.chdir(cwd)
-    jdata["model"] = model_name
+        model_name = None
+        linked_model = None
     langevin = jdata.get("langevin", True)
 
     cwd = os.getcwd()
@@ -845,7 +1068,8 @@ def _make_tasks(
         create_path(work_path)
         os.chdir(work_path)
         os.symlink(os.path.relpath(copied_conf), "conf.lmp")
-        os.symlink(os.path.relpath(linked_model), model_name)
+        if not if_harmonic:
+            os.symlink(os.path.relpath(linked_model), model_name)
         if if_meam:
             meam_library_basename = os.path.basename(meam_model["library"])
             meam_potential_basename = os.path.basename(meam_model["potential"])
@@ -885,6 +1109,9 @@ def _make_tasks(
                 timestep,
                 ens,
                 temp,
+                spin_ref_s0=spin_ref_s0,
+                spin_map=spin_map,
+                spin_reference=spin_reference,
                 thermo_freq=thermo_freq,
                 dump_freq=dump_freq,
                 copies=copies,
@@ -899,6 +1126,9 @@ def _make_tasks(
                 spring_lambda_mode=spring_lambda_mode,
                 lattice_flag=lattice_flag,
                 spin_flag=spin_flag,
+                if_harmonic=if_harmonic,
+                m_target_spring_k=m_target_spring_k,
+                m_target_spring_spin_k=m_target_spring_spin_k,
             )
         elif ref == "ideal":
             raise RuntimeError("choose hti_liq.py")
@@ -1044,10 +1274,10 @@ def _post_tasks(
     assert os.path.isfile(equi_conf)
     if natoms is None:
         natoms = get_natoms(equi_conf)
-        nspins = get_nspins(equi_conf, natoms)
+        # nspins = get_nspins(equi_conf, natoms)
         if "copies" in jdata:
             natoms *= np.prod(jdata["copies"])
-            nspins *= np.prod(jdata["copies"])
+            # nspins *= np.prod(jdata["copies"])
 
     all_lambda = []
     all_es = []
@@ -1062,6 +1292,7 @@ def _post_tasks(
     all_enthalpy = []
     all_msd_xyz = []
     all_msd_spin = []
+    spin_reference = _get_spin_reference_mode(jdata)
 
     for ii in all_tasks:
         log_name = os.path.join(ii, "log.lammps")
@@ -1072,8 +1303,11 @@ def _post_tasks(
         spa, spe = block_avg(data[:, 10], skip=stat_skip, block_size=stat_bsize)
         etot, etot_err = block_avg(data[:, 3], skip=stat_skip, block_size=stat_bsize)
         enthalpy, _ = block_avg(data[:, 4], skip=stat_skip, block_size=stat_bsize)
-        msd_xyz = data[-1, -5]   # c_allmsd[4]
-        msd_spin = data[-1, -1]  # c_spinmsd[4]
+        msd_xyz = data[-1, 14]   # c_allmsd[4]
+        if spin_reference == "modulus":
+            msd_spin = data[-1, 19]  # c_spinmodmsd
+        else:
+            msd_spin = data[-1, 18]  # c_spinmsd[4]
         sa /= natoms
         se /= natoms
         spa /= natoms
@@ -1178,7 +1412,11 @@ def _post_tasks(
         os.path.join(iter_name, "hti.out"),
         all_print.T,
         fmt="%.8e",
-        header="lmbda dU dU_err Ud Us Usp Ud_err Us_err Usp_err etot spring_eng enthalpy msd_xyz msd_spin",
+        header=(
+            "lmbda dU dU_err Ud Us Usp Ud_err Us_err Usp_err etot "
+            "spring_eng enthalpy msd_xyz "
+            + ("msd_spin_mod" if spin_reference == "modulus" else "msd_spin")
+        ),
     )
 
     diff_e, err, sys_err = integrate_range_hti(all_lambda, de, all_err, scheme=scheme)
@@ -1351,17 +1589,19 @@ def compute_task(
     jdata = json.load(open(os.path.join(job, "in.json")))
     if "reference" not in jdata:
         jdata["reference"] = "einstein"
-    spin_like = any(
-        key in jdata for key in ["spin_spring_k", "spring_spin_k", "s_spring_k", "spring_k_spin", "spin_model", "spin_mu", "lambda_spin_spring_off"]
-    )
+    spin_reference = _get_spin_reference_mode(jdata)
 
     if jdata["crystal"] == "vega":
         e0 = free_energy(job)
     if jdata["crystal"] == "frenkel":
-        if spin_like:
+        if spin_reference == "vector":
             e0 = magnetic_frenkel(job)
-        else:
+        elif spin_reference == "modulus":
+            e0 = magnetic_frenkel_modulus(job)
+        elif spin_reference == "none":
             e0 = frenkel(job)
+        else:
+            raise RuntimeError("unknown spin_reference", spin_reference)
     de, de_err, thermo_info = post_tasks(job, jdata, method=method, scheme=scheme)
     # printing
     print_format = "%20.12f  %10.3e  %10.3e"
@@ -1370,7 +1610,12 @@ def compute_task(
     info = thermo_info.copy()
 
     if jdata["reference"] == "einstein":
-        print(f"# free ener of Einstein Mole: {e0:20.8f}")
+        if jdata["crystal"] == "frenkel" and spin_reference == "vector":
+            print(f"# free ener of magnetic Frenkel Mole: {e0:20.8f}")
+        elif jdata["crystal"] == "frenkel" and spin_reference == "modulus":
+            print(f"# free ener of magnetic Frenkel modulus: {e0:20.8f}")
+        else:
+            print(f"# free ener of Einstein Mole: {e0:20.8f}")
     else:
         print(f"# free ener of ideal gas: {e0:20.8f}")
 

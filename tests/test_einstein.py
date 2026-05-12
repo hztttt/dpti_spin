@@ -3,16 +3,20 @@ import unittest
 
 import numpy as np
 import scipy.constants as pc
-from scipy.integrate import quad
 
 # from numpy.testing import assert_almost_equal
 from dpti.einstein import (
+    compute_spin_lambda,
+    compute_spin_spring,
     free_energy,
     frenkel,
     ideal_gas_fe,
+    magnetic_frenkel,
+    magnetic_frenkel_modulus,
     spin_ref_fe_per_atom,
     spin_ref_partition,
 )
+from scipy.integrate import quad
 
 lambda_seq = [
     "0.00:0.05:0.010",
@@ -107,6 +111,33 @@ class TestEinstein(unittest.TestCase):
 #         self.assertAlmostEqual(sys_err2, sys_err2, places=8)
 
 
+class TestComputeSpinSpring(unittest.TestCase):
+    def test_value_at_200K(self):
+        temp, k = 200.0, 0.12
+        expected = np.sqrt(0.5 * k * pc.electron_volt / (pc.Boltzmann * temp * np.pi))
+        self.assertAlmostEqual(compute_spin_spring(temp, k), expected, places=12)
+
+    def test_scales_with_sqrt_k(self):
+        temp = 300.0
+        v1 = compute_spin_spring(temp, 0.10)
+        v2 = compute_spin_spring(temp, 0.40)
+        self.assertAlmostEqual(v2 / v1, 2.0, places=12)
+
+
+class TestComputeSpinLambda(unittest.TestCase):
+    def test_value_at_200K(self):
+        temp, mu = 200.0, 1.0
+        ret = 2.0 * np.pi * mu * (1e-3 / pc.Avogadro) * pc.Boltzmann * temp / (pc.Planck ** 2)
+        expected = 1.0 / np.sqrt(ret)
+        self.assertAlmostEqual(compute_spin_lambda(temp, mu), expected, places=20)
+
+    def test_scales_inversely_with_sqrt_T(self):
+        mu = 1.0
+        v1 = compute_spin_lambda(100.0, mu)
+        v2 = compute_spin_lambda(400.0, mu)
+        self.assertAlmostEqual(v2 / v1, 0.5, places=12)
+
+
 class TestSpinRefFreeEnergy(unittest.TestCase):
     def test_partition_matches_direct_quadrature(self):
         temp = 2000.0
@@ -151,6 +182,136 @@ class TestSpinRefFreeEnergy(unittest.TestCase):
             expected,
             places=12,
         )
+
+_MAG_FRENKEL_DIR = os.path.join(_HTI_TEST_FILES, "magnetic_frenkel")
+_CONF_LMP = os.path.join(_HTI_TEST_FILES, "frenkel", "conf.lmp")
+
+
+class TestMagneticFrenkel(unittest.TestCase):
+    def setUp(self):
+        self.maxDiff = None
+
+    def _make_tmp_job(self, extra_keys=None, remove_keys=None):
+        """Return (tmpdir, cleanup_fn) with a valid in.json using absolute equi_conf."""
+        import json
+        import shutil
+        import tempfile
+
+        with open(os.path.join(_MAG_FRENKEL_DIR, "in.json")) as f:
+            jdata = json.load(f)
+        jdata["equi_conf"] = _CONF_LMP
+        if remove_keys:
+            for k in remove_keys:
+                jdata.pop(k, None)
+        if extra_keys:
+            jdata.update(extra_keys)
+        tmp = tempfile.mkdtemp()
+        with open(os.path.join(tmp, "in.json"), "w") as f:
+            json.dump(jdata, f)
+        return tmp, lambda: shutil.rmtree(tmp)
+
+    def test_known_value(self):
+        fe = magnetic_frenkel(_MAG_FRENKEL_DIR)
+        self.assertAlmostEqual(fe, 0.07583270037843304)
+
+    def test_include_spin_kinetic_lowers_fe(self):
+        fe_no_kin = magnetic_frenkel(_MAG_FRENKEL_DIR)
+        tmp, cleanup = self._make_tmp_job(extra_keys={"include_spin_kinetic": True})
+        try:
+            fe_kin = magnetic_frenkel(tmp)
+        finally:
+            cleanup()
+        # spin kinetic de Broglie term ln(Λ_S_kin) is very negative → sfe more negative
+        self.assertGreater(fe_no_kin, fe_kin)
+
+    def test_spring_spin_k_alias_s_spring_k(self):
+        fe_ref = magnetic_frenkel(_MAG_FRENKEL_DIR)
+        tmp, cleanup = self._make_tmp_job(
+            remove_keys=["spring_spin_k"],
+            extra_keys={"s_spring_k": 0.12},
+        )
+        try:
+            fe_alias = magnetic_frenkel(tmp)
+        finally:
+            cleanup()
+        self.assertAlmostEqual(fe_ref, fe_alias, places=12)
+
+    def test_spring_spin_k_alias_spring_k_spin(self):
+        fe_ref = magnetic_frenkel(_MAG_FRENKEL_DIR)
+        tmp, cleanup = self._make_tmp_job(
+            remove_keys=["spring_spin_k"],
+            extra_keys={"spring_k_spin": 0.12},
+        )
+        try:
+            fe_alias = magnetic_frenkel(tmp)
+        finally:
+            cleanup()
+        self.assertAlmostEqual(fe_ref, fe_alias, places=12)
+
+    def test_missing_spring_spin_k_raises(self):
+        # get_first_matched_key_from_dict raises KeyError when no key found;
+        # the ValueError guard in magnetic_frenkel covers the None case.
+        tmp, cleanup = self._make_tmp_job(
+            remove_keys=["spring_spin_k", "s_spring_k", "spring_k_spin", "spin_spring_k"]
+        )
+        try:
+            with self.assertRaises((ValueError, KeyError)):
+                magnetic_frenkel(tmp)
+        finally:
+            cleanup()
+
+    def test_invalid_spin_model_raises(self):
+        tmp, cleanup = self._make_tmp_job(extra_keys={"spin_model": "bad_model"})
+        try:
+            with self.assertRaises(ValueError):
+                magnetic_frenkel(tmp)
+        finally:
+            cleanup()
+
+    def test_magnetic_frenkel_modulus_equals_lattice_plus_spin_ref_scalar(self):
+        spin_ref = {"style": "spring", "k": 0.7, "s0": 2.0}
+        tmp, cleanup = self._make_tmp_job(
+            remove_keys=["spring_spin_k", "s_spring_k", "spring_k_spin", "spin_spring_k"],
+            extra_keys={"spin_reference": "modulus", "spin_ref": spin_ref},
+        )
+        try:
+            atom_numbs = [144]
+            expected = frenkel(tmp) + spin_ref_fe_per_atom(
+                400.0, atom_numbs, [True], spin_ref
+            )
+            self.assertAlmostEqual(magnetic_frenkel_modulus(tmp), expected, places=12)
+        finally:
+            cleanup()
+
+    def test_magnetic_frenkel_modulus_accepts_type_lists(self):
+        spin_ref = {"style": "spring", "k": [0.7], "s0": [2.0]}
+        tmp, cleanup = self._make_tmp_job(
+            remove_keys=["spring_spin_k", "s_spring_k", "spring_k_spin", "spin_spring_k"],
+            extra_keys={"spin_reference": "modulus", "spin_ref": spin_ref},
+        )
+        try:
+            atom_numbs = [144]
+            expected = frenkel(tmp) + spin_ref_fe_per_atom(
+                400.0, atom_numbs, [True], spin_ref
+            )
+            self.assertAlmostEqual(magnetic_frenkel_modulus(tmp), expected, places=12)
+        finally:
+            cleanup()
+
+    def test_magnetic_frenkel_modulus_rejects_non_harmonic_style(self):
+        tmp, cleanup = self._make_tmp_job(
+            remove_keys=["spring_spin_k", "s_spring_k", "spring_k_spin", "spin_spring_k"],
+            extra_keys={
+                "spin_reference": "modulus",
+                "spin_ref": {"style": "lj_core", "k": 0.7, "s0": 2.0},
+            },
+        )
+        try:
+            with self.assertRaises(ValueError):
+                magnetic_frenkel_modulus(tmp)
+        finally:
+            cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()

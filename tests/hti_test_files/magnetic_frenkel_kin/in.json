@@ -1,0 +1,14 @@
+{
+    "equi_conf": "../frenkel/conf.lmp",
+    "temp": 400,
+    "mass_map": [
+        118.71
+    ],
+    "spin_mass": 1.0,
+    "spin_map": [
+        true
+    ],
+    "spring_k": 0.02,
+    "spring_spin_k": 0.12,
+    "include_spin_kinetic": true
+}

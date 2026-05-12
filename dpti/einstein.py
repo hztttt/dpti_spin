@@ -292,7 +292,7 @@ def magnetic_frenkel(job):
     if spin_model not in ["tspin", "llg"]:
         raise ValueError("spin_model must be either 'tspin' or 'llg'")
 
-    include_spin_kinetic = bool(jdata.get("include_spin_kinetic", True))
+    include_spin_kinetic = bool(jdata.get("include_spin_kinetic", False))
     h_s = float(jdata.get("h_s", pc.Planck))
 
     if "copies" in jdata:
@@ -322,10 +322,8 @@ def magnetic_frenkel(job):
         fe += 3.0 * ii * np.log(Lambda_E[idx])
         sum_m += mass_map[idx] * ii
         if spin_map[idx]:
-             # magentic contributions.
+            # magnetic contributions
             sfe += 3.0 * ii * np.log(Lambda_S_ref[idx])
-            # K_spin_zero = spring_spin_k * spin_mass * sum_m
-            # sfe -= 3.0 * np.log(compute_spin_spring(temp, K_spin_zero))
             if include_spin_kinetic:
                 sfe += 3.0 * ii * np.log(Lambda_S_kin[idx])
 
@@ -333,12 +331,60 @@ def magnetic_frenkel(job):
     fe -= 1.5 * np.log(sum_m)
     fe += np.log(total_atoms / (vol * (pc.angstrom**3)))
 
+    # if spin_model == "tspin":
+    #     fe += 3.0 * total_atoms * np.log(Lambda_S_ref)
+    # else:
+    #     kbt_ev = pc.Boltzmann * temp / pc.electron_volt
+    #     beta_ev = 1.0 / kbt_ev
+    #     if spin_spring_k <= 0.0:
+    #         raise ValueError("spin_spring_k must be positive for llg model")
+    #     spin_factor = (2.0 * np.pi * kbt_ev / spin_spring_k) * (
+    #         1.0 - np.exp(-2.0 * beta_ev * spin_spring_k)
+    #     )
+    #     fe -= total_atoms * np.log(spin_factor)
+
     fe *= pc.Boltzmann * temp / pc.electron_volt
     fe /= total_atoms
     sfe *= pc.Boltzmann * temp / pc.electron_volt
     sfe /= total_atoms
     fe += sfe
     return fe
+
+
+def magnetic_frenkel_modulus(job):
+    """Frenkel lattice reference plus harmonic spin-modulus reference."""
+    with open(os.path.join(job, "in.json")) as f:
+        jdata = json.load(f)
+
+    spin_ref = jdata.get("spin_ref")
+    if spin_ref is None:
+        raise ValueError("magnetic_frenkel_modulus requires `spin_ref` in in.json")
+
+    spin_ref_style = str(spin_ref.get("style", "spring")).lower()
+    if spin_ref_style not in ("spring", "harmonic"):
+        raise ValueError(
+            "magnetic_frenkel_modulus supports only harmonic/spring spin_ref style"
+        )
+
+    equi_conf = jdata["equi_conf"]
+    cwd = os.getcwd()
+    os.chdir(job)
+    assert os.path.isfile(equi_conf)
+    equi_conf = os.path.abspath(equi_conf)
+    os.chdir(cwd)
+
+    spin_map = get_first_matched_key_from_dict(jdata, ["spin_map", "sp_map"])
+    if "copies" in jdata:
+        ncopies = np.prod(jdata["copies"])
+    else:
+        ncopies = 1
+
+    with open(equi_conf) as f:
+        sys_data = lmp.to_system_data(f.read().split("\n"))
+
+    atom_numbs = [ii * ncopies for ii in sys_data["atom_numbs"]]
+    spin_fe = spin_ref_fe_per_atom(jdata["temp"], atom_numbs, spin_map, spin_ref)
+    return frenkel(job) + spin_fe
 
 def _main():
     parser = argparse.ArgumentParser(
