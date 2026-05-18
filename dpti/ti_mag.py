@@ -49,6 +49,27 @@ def parse_seq_ginv(seq):
     return 1.0 / inv_grid
 
 
+def _get_thermo_labels(lmplog):
+    with open(lmplog) as fp:
+        for line in fp:
+            labels = line.split()
+            if labels and labels[0] == "Step":
+                return labels
+    return []
+
+
+def _get_spin_kinetic_col(lmplog, data):
+    labels = _get_thermo_labels(lmplog)
+    for idx, label in enumerate(labels):
+        if label.lower() in ("spinkineng", "ske"):
+            return idx
+
+    # New ti-mag logs have exactly one extra column inserted after Volume.
+    if data.ndim == 2 and data.shape[1] >= 17:
+        return 8
+    return None
+
+
 def _gen_lammps_input(
     conf_file,
     mass_map,
@@ -109,7 +130,7 @@ def _gen_lammps_input(
     ret += "compute         spin all property/atom sp spx spy spz fmx fmy fmz\n"
     ret += "compute         allmsd all msd\n"
     ret += "compute         spinmsd all msd/spin\n"
-    ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_allmsd[*] c_spinmsd[*]\n"
+    ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol ske c_allmsd[*] c_spinmsd[*]\n"
     ret += "thermo_modify   format float %20.6f\n"
     ret += "dump            1 all custom ${DUMP_FREQ} traj.dump id type x y z vx vy vz c_spin[1] c_spin[2] c_spin[3] c_spin[4]\n"
     # ----- ensemble / thermostat -----
@@ -422,9 +443,9 @@ def post_tasks(
 ):
     """Post-process TI tasks for a magnetic spin system.
 
-    Thermo columns (with spinmsd):
-      0:Step 1:KinEng 2:PotEng 3:TotEng 4:Enthalpy 5:Temp 6:Press 7:Vol
-      8-11: c_allmsd[1..4]   12-15: c_spinmsd[1..4]
+    Thermo columns (with ske and spinmsd):
+      0:Step 1:KinEng 2:PotEng 3:TotEng 4:Enthalpy 5:Temp 6:Press 7:Vol 8:SKE
+      9-12: c_allmsd[1..4]   13-16: c_spinmsd[1..4]
     """
     equi_conf = get_task_file_abspath(iter_name, jdata["equi_conf"])
     if natoms is None:
@@ -443,6 +464,8 @@ def post_tasks(
 
     all_tasks = sorted(glob.glob(os.path.join(iter_name, "task.[0-9]*")))
     ntasks = len(all_tasks)
+
+    include_spin_kinetic = bool(jdata.get("include_spin_kinetic", False))
 
     stat_col2 = None
     if "nvt" in ens and path == "t":
@@ -476,6 +499,7 @@ def post_tasks(
         log_name = os.path.join(ii, "log.lammps")
         data = get_thermo(log_name)
         np.savetxt(os.path.join(ii, "data"), data, fmt="%20.6f")
+        spin_kinetic_col = _get_spin_kinetic_col(log_name, data)
 
         if stat_col2 is not None:
             ea, ee = block_avg(
@@ -487,6 +511,21 @@ def post_tasks(
             ea, ee = block_avg(data[:, stat_col], skip=stat_skip, block_size=stat_bsize)
 
         enthalpy, _ = block_avg(data[:, 4], skip=stat_skip, block_size=stat_bsize)
+
+        if path in ("t", "t-ginv") and not include_spin_kinetic:
+            if spin_kinetic_col is None:
+                raise RuntimeError(
+                    f"{log_name} does not contain a SpinKinEng/ske thermo column; "
+                    "regenerate the ti-mag task with the updated input generator, "
+                    "or set include_spin_kinetic=true for legacy logs."
+                )
+            ska, _ = block_avg(
+                data[:, spin_kinetic_col],
+                skip=stat_skip,
+                block_size=stat_bsize,
+            )
+            ea -= ska
+            enthalpy -= ska
 
         # COM correction: 3/2 kBT per atom for translational DoF
         if path in ("t", "t-ginv"):
