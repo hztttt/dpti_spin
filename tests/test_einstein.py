@@ -13,7 +13,9 @@ from dpti.einstein import (
     ideal_gas_fe,
     magnetic_frenkel,
     magnetic_frenkel_modulus,
+    spin_ref_analytic_per_atom,
     spin_ref_fe_per_atom,
+    spin_ref_mean_energy,
     spin_ref_partition,
 )
 from scipy.integrate import quad
@@ -163,6 +165,31 @@ class TestSpinRefFreeEnergy(unittest.TestCase):
         expected = np.pi ** 1.5 / a ** 1.5
         self.assertAlmostEqual(spin_ref_partition(k, 0.0, beta), expected, places=12)
 
+    def test_mean_energy_matches_direct_quadrature(self):
+        temp = 2000.0
+        k = 0.7
+        s0 = 2.0
+        beta = 1.0 / (pc.Boltzmann / pc.electron_volt * temp)
+        z_spin = spin_ref_partition(k, s0, beta)
+        expected, _ = quad(
+            lambda s: (
+                4.0
+                * np.pi
+                * 0.5
+                * k
+                * (s - s0) ** 2
+                * s
+                * s
+                * np.exp(-0.5 * beta * k * (s - s0) ** 2)
+            ),
+            0.0,
+            np.inf,
+            epsabs=0.0,
+            epsrel=1.0e-11,
+            limit=200,
+        )
+        self.assertAlmostEqual(spin_ref_mean_energy(k, s0, beta), expected / z_spin, places=11)
+
     def test_fe_per_atom_weighted_by_spin_types(self):
         temp = 2000.0
         atom_numbs = [2, 1, 3]
@@ -182,6 +209,18 @@ class TestSpinRefFreeEnergy(unittest.TestCase):
             expected,
             places=12,
         )
+
+    def test_analytic_per_atom_reports_mean_energy(self):
+        analytic = spin_ref_analytic_per_atom(
+            2000.0,
+            [4],
+            [1],
+            {"style": "spring", "k": 1.0, "s0": 2.5},
+        )
+        self.assertEqual(len(analytic["per_type"]), 1)
+        self.assertAlmostEqual(analytic["free_energy"], -0.7636030451901273)
+        self.assertAlmostEqual(analytic["mean_energy"], analytic["per_type"][0]["mean_energy"])
+
 
 _MAG_FRENKEL_DIR = os.path.join(_HTI_TEST_FILES, "magnetic_frenkel")
 _CONF_LMP = os.path.join(_HTI_TEST_FILES, "frenkel", "conf.lmp")

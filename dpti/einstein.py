@@ -7,6 +7,7 @@ import os
 
 import numpy as np
 import scipy.constants as pc
+from scipy.integrate import quad
 
 # from . import lib
 from dpti.lib import lmp
@@ -71,6 +72,17 @@ def spin_ref_partition(k, s0, beta):
     )
 
 
+def spin_ref_mean_energy(k, s0, beta):
+    z_spin = spin_ref_partition(k, s0, beta)
+
+    def integrand(s):
+        u = 0.5 * k * (s - s0) ** 2
+        return u * s * s * np.exp(-0.5 * beta * k * (s - s0) ** 2)
+
+    val, _ = quad(integrand, 0.0, np.inf, epsabs=0.0, epsrel=1.0e-10, limit=200)
+    return 4.0 * np.pi * val / z_spin
+
+
 def spin_ref_fe_per_atom(temp, atom_numbs, spin_map, spin_ref):
     style = str(spin_ref.get("style", "spring")).lower()
     if style not in ("spring", "harmonic"):
@@ -92,6 +104,43 @@ def spin_ref_fe_per_atom(temp, atom_numbs, spin_map, spin_ref):
         z_spin = spin_ref_partition(k, s0, beta)
         fe += (count / natoms) * (-kbt * np.log(z_spin))
     return float(fe)
+
+
+def spin_ref_analytic_per_atom(temp, atom_numbs, spin_map, spin_ref):
+    style = str(spin_ref.get("style", "spring")).lower()
+    if style not in ("spring", "harmonic"):
+        raise ValueError("spin_ref analytic values support only harmonic spin_ref style")
+
+    ntypes = len(atom_numbs)
+    k_by_type = _expand_type_param(spin_ref.get("k", 0.0), ntypes, "spin_ref.k")
+    s0_by_type = _expand_type_param(spin_ref.get("s0", 0.0), ntypes, "spin_ref.s0")
+    natoms = sum(atom_numbs)
+    if natoms <= 0:
+        return {"free_energy": 0.0, "mean_energy": 0.0, "per_type": []}
+
+    kbt = pc.Boltzmann / pc.electron_volt * temp
+    beta = 1.0 / kbt
+    fe = 0.0
+    u = 0.0
+    per_type = []
+    for ii, (count, is_spin, k, s0) in enumerate(zip(atom_numbs, spin_map, k_by_type, s0_by_type)):
+        if not is_spin or count == 0:
+            continue
+        z_spin = spin_ref_partition(k, s0, beta)
+        fe_type = -kbt * np.log(z_spin)
+        u_type = spin_ref_mean_energy(k, s0, beta)
+        weight = count / natoms
+        fe += weight * fe_type
+        u += weight * u_type
+        per_type.append({
+            "type": int(ii + 1),
+            "count": int(count),
+            "k": float(k),
+            "s0": float(s0),
+            "free_energy": float(fe_type),
+            "mean_energy": float(u_type),
+        })
+    return {"free_energy": float(fe), "mean_energy": float(u), "per_type": per_type}
 
 
 def ideal_gas_fe(job):
