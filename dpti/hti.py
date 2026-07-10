@@ -286,11 +286,16 @@ def _ff_soft_lj(
 
 
 def _ff_two_steps(
-    lamb, model, m_spring_k, step, append=None, if_meam=False, meam_model=None
+    lamb, model, m_spring_k, step, append=None, if_meam=False, meam_model=None,
+    if_harmonic=False, m_target_spring_k=None,
 ):
     ret = ""
     ret += "# --------------------- FORCE FIELDS ---------------------\n"
-    if if_meam:
+    if if_harmonic:
+        # harmonic (Einstein crystal only): zero pair potential for validation
+        ret += "pair_style      zero 10.0\n"
+        ret += "pair_coeff      * *\n"
+    elif if_meam:
         ret += "pair_style      meam\n"
         ret += f'pair_coeff      * * {meam_model["library"]} {meam_model["element"]} {meam_model["potential"]} {meam_model["element"]}\n'
     else:
@@ -315,12 +320,22 @@ def _ff_two_steps(
 
     ret += _ff_spring(lamb, m_spring_k, var_spring)
 
-    if var_deep:
-        if if_meam:
-            ret += "fix             l_deep all adapt 1 pair meam scale * * v_LAMBDA\n"
-        else:
-            ret += "fix             l_deep all adapt 1 pair deepmd scale * * v_LAMBDA\n"
-    ret += "compute         e_deep all pe pair\n"
+    if if_harmonic:
+        # target Einstein springs (k2): scale by lambda in deep_on, full strength in spring_off
+        ntypes = len(m_target_spring_k)
+        for ii in range(ntypes):
+            k2_const = m_target_spring_k[ii] * lamb if var_deep else m_target_spring_k[ii]
+            ret += f"fix             l_k2_spring_{ii+1} type_{ii+1} spring/self {k2_const:.10e}\n"
+            ret += f"fix_modify      l_k2_spring_{ii+1} energy yes\n"
+        sum_str = "+".join([f"f_l_k2_spring_{ii+1}" for ii in range(ntypes)])
+        ret += f"variable        e_k2_spring equal {sum_str}\n"
+    else:
+        if var_deep:
+            if if_meam:
+                ret += "fix             l_deep all adapt 1 pair meam scale * * v_LAMBDA\n"
+            else:
+                ret += "fix             l_deep all adapt 1 pair deepmd scale * * v_LAMBDA\n"
+        ret += "compute         e_deep all pe pair\n"
     return ret
 
 
@@ -348,6 +363,8 @@ def _gen_lammps_input(
     meam_model=None,
     custom_variables=None,
     append=None,
+    if_harmonic=False,
+    m_target_spring_k=None,
 ):
     ret = ""
     ret += "clear\n"
@@ -387,6 +404,8 @@ def _gen_lammps_input(
             append=append,
             if_meam=if_meam,
             meam_model=meam_model,
+            if_harmonic=if_harmonic,
+            m_target_spring_k=m_target_spring_k,
         )
     elif switch == "three-step":
         ret += _ff_soft_lj(
@@ -407,22 +426,23 @@ def _gen_lammps_input(
     ret += f"timestep        {timestep}\n"
     ret += "thermo          ${THERMO_FREQ}\n"
     ret += "compute         allmsd all msd\n"
+    e_deep_col = "v_e_k2_spring" if if_harmonic else "c_e_deep"
     if 1 - lamb != 0:
         if not isinstance(m_spring_k, list):
             if switch == "three-step":
                 ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_diff[1] c_allmsd[*]\n"
             else:
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring c_e_deep c_allmsd[*]\n"
+                ret += f"thermo_style    custom step ke pe etotal enthalpy temp press vol f_l_spring {e_deep_col} c_allmsd[*]\n"
         else:
             if switch == "three-step":
                 ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_diff[1] c_allmsd[*]\n"
             else:
-                ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring c_e_deep c_allmsd[*]\n"
+                ret += f"thermo_style    custom step ke pe etotal enthalpy temp press vol v_l_spring {e_deep_col} c_allmsd[*]\n"
     else:
         if switch == "three-step":
             ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_diff[1] c_e_diff[1] c_allmsd[*]\n"
         else:
-            ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol c_e_deep c_e_deep c_allmsd[*]\n"
+            ret += f"thermo_style    custom step ke pe etotal enthalpy temp press vol {e_deep_col} {e_deep_col} c_allmsd[*]\n"
     ret += "thermo_modify   format 9 %.16e\n"
     ret += "thermo_modify   format 10 %.16e\n"
     ret += "dump            1 all custom ${DUMP_FREQ} dump.hti id type x y z vx vy vz\n"
@@ -542,9 +562,11 @@ def _gen_lammps_input(
 def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None):
     if if_meam is None:
         if_meam = jdata.get("if_meam", False)
+    if_harmonic = jdata.get("harmonic", False)
     equi_conf = os.path.abspath(jdata["equi_conf"])
     meam_model = jdata.get("meam_model", None)
-    model = os.path.abspath(jdata["model"])
+    if not if_harmonic:
+        model = os.path.abspath(jdata["model"])
 
     if if_meam is None:
         if_meam = jdata.get("if_meam", None)
@@ -558,6 +580,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
             step="both",
             if_meam=if_meam,
             meam_model=meam_model,
+            if_harmonic=if_harmonic,
         )
         if if_meam:
             relative_link_file(meam_model["library"], iter_name)
@@ -569,16 +592,16 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
         copied_conf = os.path.join(os.path.abspath(iter_name), "conf.lmp")
         shutil.copyfile(equi_conf, copied_conf)
         jdata["equi_conf"] = "conf.lmp"
-        linked_model = os.path.join(os.path.abspath(iter_name), "graph.pb")
 
         if if_meam:
             relative_link_file(meam_model["library"], job_abs_dir)
             relative_link_file(meam_model["potential"], job_abs_dir)
-        else:
-            pass
 
-        shutil.copyfile(model, linked_model)
-        jdata["model"] = "graph.pb"
+        if not if_harmonic:
+            linked_model = os.path.join(os.path.abspath(iter_name), "graph.pb")
+            shutil.copyfile(model, linked_model)
+            jdata["model"] = "graph.pb"
+
         cwd = os.getcwd()
         os.chdir(iter_name)
         with open("in.json", "w") as fp:
@@ -594,6 +617,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                 link=True,
                 if_meam=if_meam,
                 meam_model=meam_model,
+                if_harmonic=if_harmonic,
             )
             subtask_name = "01.spring_off"
             _make_tasks(
@@ -605,6 +629,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                 link=True,
                 if_meam=if_meam,
                 meam_model=meam_model,
+                if_harmonic=if_harmonic,
             )
         elif switch == "three-step":
             subtask_name = "00.lj_on"
@@ -617,6 +642,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                 link=True,
                 if_meam=if_meam,
                 meam_model=meam_model,
+                if_harmonic=if_harmonic,
             )
             subtask_name = "01.deep_on"
             _make_tasks(
@@ -628,6 +654,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                 link=True,
                 if_meam=if_meam,
                 meam_model=meam_model,
+                if_harmonic=if_harmonic,
             )
             subtask_name = "02.spring_off"
             _make_tasks(
@@ -639,6 +666,7 @@ def make_tasks(iter_name, jdata, ref="einstein", switch="one-step", if_meam=None
                 link=True,
                 if_meam=if_meam,
                 meam_model=meam_model,
+                if_harmonic=if_harmonic,
             )
         else:
             raise RuntimeError("unknow switch", switch)
@@ -656,6 +684,7 @@ def _make_tasks(
     link=False,
     if_meam=False,
     meam_model=None,
+    if_harmonic=False,
 ):
     if "crystal" not in jdata:
         print("do not find crystal in jdata, assume vega")
@@ -695,8 +724,11 @@ def _make_tasks(
 
     equi_conf = jdata["equi_conf"]
     equi_conf = os.path.abspath(equi_conf)
-    model = jdata["model"]
-    model = os.path.abspath(model)
+    if not if_harmonic:
+        model = jdata["model"]
+        model = os.path.abspath(model)
+    else:
+        model = None
     # mass_map = jdata['mass_map']
     mass_map = get_first_matched_key_from_dict(jdata, ["mass_map", "model_mass_map"])
     nsteps = jdata["nsteps"]
@@ -738,6 +770,10 @@ def _make_tasks(
         m_spring_k = []
         for ii in mass_map:
             m_spring_k.append(spring_k * ii)
+    m_target_spring_k = None
+    if if_harmonic:
+        target_spring_k = jdata["target_spring_k"]
+        m_target_spring_k = [target_spring_k * ii for ii in mass_map]
     # thermo_freq = jdata['thermo_freq']
     thermo_freq = get_first_matched_key_from_dict(jdata, ["thermo_freq", "stat_freq"])
     dump_freq = get_first_matched_key_from_dict(
@@ -761,15 +797,18 @@ def _make_tasks(
         os.symlink(os.path.relpath(equi_conf), "conf.lmp")
         os.chdir(cwd)
     jdata["equi_conf"] = "conf.lmp"
-    linked_model = os.path.join(os.path.abspath(iter_name), "graph.pb")
-    if not link:
-        shutil.copyfile(model, linked_model)
+    if not if_harmonic:
+        linked_model = os.path.join(os.path.abspath(iter_name), "graph.pb")
+        if not link:
+            shutil.copyfile(model, linked_model)
+        else:
+            cwd = os.getcwd()
+            os.chdir(iter_name)
+            os.symlink(os.path.relpath(model), "graph.pb")
+            os.chdir(cwd)
+        jdata["model"] = "graph.pb"
     else:
-        cwd = os.getcwd()
-        os.chdir(iter_name)
-        os.symlink(os.path.relpath(model), "graph.pb")
-        os.chdir(cwd)
-    jdata["model"] = "graph.pb"
+        linked_model = None
     langevin = jdata.get("langevin", True)
 
     cwd = os.getcwd()
@@ -783,7 +822,8 @@ def _make_tasks(
         create_path(work_path)
         os.chdir(work_path)
         os.symlink(os.path.relpath(copied_conf), "conf.lmp")
-        os.symlink(os.path.relpath(linked_model), "graph.pb")
+        if not if_harmonic:
+            os.symlink(os.path.relpath(linked_model), "graph.pb")
         if if_meam:
             meam_library_basename = os.path.basename(meam_model["library"])
             meam_potential_basename = os.path.basename(meam_model["potential"])
@@ -824,6 +864,8 @@ def _make_tasks(
                 meam_model=meam_model,
                 custom_variables=custom_variables,
                 append=append,
+                if_harmonic=if_harmonic,
+                m_target_spring_k=m_target_spring_k,
             )
         elif ref == "ideal":
             raise RuntimeError("choose hti_liq.py")

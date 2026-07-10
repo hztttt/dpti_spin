@@ -38,17 +38,38 @@ def _lambda_factor(lamb, mode):
     return 1.0
 
 
+def _type_param(params, name, idx):
+    value = params[name]
+    if isinstance(value, (list, tuple)):
+        return value[idx]
+    return value
+
+
+def _type_param_first(params, names, idx):
+    for name in names:
+        if name in params:
+            return _type_param(params, name, idx)
+    raise KeyError(names[0])
+
+
 def _ff_spin_mod(
     lamb,
     m_spring_spin_k,
     spin_ref_s0,
     spin_map,
     mode,
+    spin_mod_style="spring",
+    spin_lj_core=None,
+    spin_poly_core=None,
 ):
     """Return LAMMPS lines for the spin-modulus confining potential.
 
-    spring/spin/mod k S0 is the only supported spin reference.  k is scaled by
-    the lambda schedule; S0 remains fixed.
+    spin_mod_style:
+      spring  -> spring/spin/mod k S0, with k scaled by lambda schedule
+      lj_core -> spin/lj/core eps_low Smin n eps_high Smax m [S_eps],
+                 with eps_low/eps_high scaled by lambda schedule
+      poly_core -> spin/poly/core eps Smin Smax p [S_eps],
+                   with eps scaled by lambda schedule
 
     mode: 'on'   -> factor = lambda        (soft_on / spin_mod_on)
           'off'  -> factor = 1 - lambda    (soft_off / spin_mod_off)
@@ -67,18 +88,54 @@ def _ff_spin_mod(
     for ii in spin_types:
         ret += f"group           type_{ii + 1} type {ii + 1}\n"
 
-    for ii in spin_types:
-        k = m_spring_spin_k[ii] * factor
-        s0 = spin_ref_s0[ii]
-        ret += f"fix             l_spring_spin_{ii + 1} type_{ii + 1} spring/spin/mod {k:.10e} {s0:.10e}\n"
-        ret += f"fix_modify      l_spring_spin_{ii + 1} energy yes\n"
+    style = str(spin_mod_style).lower()
+    if style in ("spring", "harmonic"):
+        for ii in spin_types:
+            k = m_spring_spin_k[ii] * factor
+            s0 = spin_ref_s0[ii]
+            ret += f"fix             l_spring_spin_{ii + 1} type_{ii + 1} spring/spin/mod {k:.10e} {s0:.10e}\n"
+            ret += f"fix_modify      l_spring_spin_{ii + 1} energy yes\n"
+    elif style in ("lj_core", "spin_lj_core", "lj-core"):
+        if spin_lj_core is None:
+            raise RuntimeError("spin_mod_style='lj_core' requires spin_lj_core parameters")
+        for ii in spin_types:
+            eps_low = float(_type_param(spin_lj_core, "eps_low", ii)) * factor
+            s_min = float(_type_param_first(spin_lj_core, ("s_min", "smin", "Smin"), ii))
+            n_exp = float(_type_param(spin_lj_core, "n", ii))
+            eps_high = float(_type_param(spin_lj_core, "eps_high", ii)) * factor
+            s_max = float(_type_param_first(spin_lj_core, ("s_max", "smax", "Smax"), ii))
+            m_exp = float(_type_param(spin_lj_core, "m", ii))
+            s_eps = float(spin_lj_core.get("s_eps", 1.0e-12))
+            ret += (
+                f"fix             l_spring_spin_{ii + 1} type_{ii + 1} "
+                f"spin/lj/core {eps_low:.10e} {s_min:.10e} {n_exp:.10e} "
+                f"{eps_high:.10e} {s_max:.10e} {m_exp:.10e} {s_eps:.10e}\n"
+            )
+            ret += f"fix_modify      l_spring_spin_{ii + 1} energy yes\n"
+    elif style in ("poly_core", "spin_poly_core", "poly-core", "polynomial"):
+        if spin_poly_core is None:
+            raise RuntimeError("spin_mod_style='poly_core' requires spin_poly_core parameters")
+        for ii in spin_types:
+            eps = float(_type_param(spin_poly_core, "eps", ii)) * factor
+            s_min = float(_type_param_first(spin_poly_core, ("s_min", "smin", "Smin"), ii))
+            s_max = float(_type_param_first(spin_poly_core, ("s_max", "smax", "Smax"), ii))
+            p_exp = float(_type_param(spin_poly_core, "p", ii))
+            s_eps = float(spin_poly_core.get("s_eps", 0.0))
+            ret += (
+                f"fix             l_spring_spin_{ii + 1} type_{ii + 1} "
+                f"spin/poly/core {eps:.10e} {s_min:.10e} {s_max:.10e} "
+                f"{p_exp:.10e} {s_eps:.10e}\n"
+            )
+            ret += f"fix_modify      l_spring_spin_{ii + 1} energy yes\n"
+    else:
+        raise RuntimeError(f"unknown spin_mod_style: {spin_mod_style}")
 
     sum_str = "+".join(f"f_l_spring_spin_{ii + 1}" for ii in spin_types)
     ret += f"variable        l_spring_spin equal {sum_str}\n"
     return ret
 
 
-def _ff_soft_on_mag(lamb, sparam, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode):
+def _ff_soft_on_mag(lamb, sparam, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode, spin_mod_style="spring", spin_lj_core=None, spin_poly_core=None):
     """Force field for soft_on step.
 
     spring_lambda_mode decides what is scaled with lambda here:
@@ -101,9 +158,9 @@ def _ff_soft_on_mag(lamb, sparam, m_spring_spin_k, spin_ref_s0, spin_map, spring
         ret += "compute         lj_pe all pair lj/cut/soft\n"
 
     if has_spin_on:
-        ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="on")
+        ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="on", spin_mod_style=spin_mod_style, spin_lj_core=spin_lj_core, spin_poly_core=spin_poly_core)
     elif has_spin_full:
-        ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="full")
+        ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="full", spin_mod_style=spin_mod_style, spin_lj_core=spin_lj_core, spin_poly_core=spin_poly_core)
     else:
         ret += "variable        l_spring_spin equal 0.0\n"
 
@@ -116,7 +173,7 @@ def _ff_soft_on_mag(lamb, sparam, m_spring_spin_k, spin_ref_s0, spin_map, spring
     return ret
 
 
-def _ff_deep_on_mag(lamb, sparam, model, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode):
+def _ff_deep_on_mag(lamb, sparam, model, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode, spin_mod_style="spring", spin_lj_core=None, spin_poly_core=None):
     """Force field for deep_on step.
 
     deepspin scales 0->1 via adapt/fep; LJ soft (if present) is full;
@@ -139,7 +196,7 @@ def _ff_deep_on_mag(lamb, sparam, model, m_spring_spin_k, spin_ref_s0, spin_map,
         ret += "pair_coeff      * *\n"
 
     if has_spin:
-        ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="full")
+        ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="full", spin_mod_style=spin_mod_style, spin_lj_core=spin_lj_core, spin_poly_core=spin_poly_core)
     else:
         ret += "variable        l_spring_spin equal 0.0\n"
 
@@ -150,7 +207,7 @@ def _ff_deep_on_mag(lamb, sparam, model, m_spring_spin_k, spin_ref_s0, spin_map,
     return ret
 
 
-def _ff_soft_off_mag(lamb, sparam, model, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode):
+def _ff_soft_off_mag(lamb, sparam, model, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode, spin_mod_style="spring", spin_lj_core=None, spin_poly_core=None):
     """Force field for soft_off step.
 
     spring_lambda_mode decides what is scaled with (1-lambda) here:
@@ -179,9 +236,9 @@ def _ff_soft_off_mag(lamb, sparam, model, m_spring_spin_k, spin_ref_s0, spin_map
         ret += "pair_coeff      * *\n"
 
     if has_scaling_spin:
-        ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="off")
+        ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="off", spin_mod_style=spin_mod_style, spin_lj_core=spin_lj_core, spin_poly_core=spin_poly_core)
     elif has_full_spin:
-        ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="full")
+        ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="full", spin_mod_style=spin_mod_style, spin_lj_core=spin_lj_core, spin_poly_core=spin_poly_core)
     else:
         ret += "variable        l_spring_spin equal 0.0\n"
 
@@ -196,20 +253,20 @@ def _ff_soft_off_mag(lamb, sparam, model, m_spring_spin_k, spin_ref_s0, spin_map
     return ret
 
 
-def _ff_spin_mod_on_mag(lamb, m_spring_spin_k, spin_ref_s0, spin_map):
+def _ff_spin_mod_on_mag(lamb, m_spring_spin_k, spin_ref_s0, spin_map, spin_mod_style="spring", spin_lj_core=None, spin_poly_core=None):
     """Force field for spin_mod_on step (spin_only mode).
 
     No lattice interaction (U_lattice=0 throughout spin_only path);
     spin_mod scales 0->1.
     """
     ret = "# --------------------- FORCE FIELDS ---------------------\n"
-    ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="on")
+    ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="on", spin_mod_style=spin_mod_style, spin_lj_core=spin_lj_core, spin_poly_core=spin_poly_core)
     ret += "variable        e_diff equal v_l_spring_spin/v_LAMBDA\n"
     ret += "compute         spin all property/atom sp spx spy spz fmx fmy fmz\n"
     return ret
 
 
-def _ff_spin_mod_off_mag(lamb, model, m_spring_spin_k, spin_ref_s0, spin_map):
+def _ff_spin_mod_off_mag(lamb, model, m_spring_spin_k, spin_ref_s0, spin_map, spin_mod_style="spring", spin_lj_core=None, spin_poly_core=None):
     """Force field for spin_mod_off step (split mode only).
 
     deepspin is fully on (no LJ soft); spin_mod scales 1->0.
@@ -218,7 +275,7 @@ def _ff_spin_mod_off_mag(lamb, model, m_spring_spin_k, spin_ref_s0, spin_map):
     ret += "variable        INV_LAMBDA equal 1-${LAMBDA}\n"
     ret += f"pair_style      deepspin {model}\n"
     ret += "pair_coeff      * *\n"
-    ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="off")
+    ret += _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode="off", spin_mod_style=spin_mod_style, spin_lj_core=spin_lj_core, spin_poly_core=spin_poly_core)
     ret += "variable        e_diff equal -v_l_spring_spin/v_INV_LAMBDA\n"
     ret += "compute         spin all property/atom sp spx spy spz fmx fmy fmz\n"
     return ret
@@ -240,6 +297,9 @@ def _gen_lammps_input_mag_liq(
     spin_ref_s0,
     spin_map,
     spring_lambda_mode,
+    spin_mod_style,
+    spin_lj_core,
+    spin_poly_core,
     nsteps,
     timestep,
     ens,
@@ -279,15 +339,15 @@ def _gen_lammps_input_mag_liq(
         ret += "mass            %d %f\n" % (jj + 1, mass_map[jj])
 
     if step == "soft_on":
-        ret += _ff_soft_on_mag(lamb, soft_param, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode)
+        ret += _ff_soft_on_mag(lamb, soft_param, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode, spin_mod_style, spin_lj_core, spin_poly_core)
     elif step == "deep_on":
-        ret += _ff_deep_on_mag(lamb, soft_param, model, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode)
+        ret += _ff_deep_on_mag(lamb, soft_param, model, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode, spin_mod_style, spin_lj_core, spin_poly_core)
     elif step == "soft_off":
-        ret += _ff_soft_off_mag(lamb, soft_param, model, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode)
+        ret += _ff_soft_off_mag(lamb, soft_param, model, m_spring_spin_k, spin_ref_s0, spin_map, spring_lambda_mode, spin_mod_style, spin_lj_core, spin_poly_core)
     elif step == "spin_mod_on":
-        ret += _ff_spin_mod_on_mag(lamb, m_spring_spin_k, spin_ref_s0, spin_map)
+        ret += _ff_spin_mod_on_mag(lamb, m_spring_spin_k, spin_ref_s0, spin_map, spin_mod_style, spin_lj_core, spin_poly_core)
     elif step in ("spin_mod_off", "spin_ref_off"):
-        ret += _ff_spin_mod_off_mag(lamb, model, m_spring_spin_k, spin_ref_s0, spin_map)
+        ret += _ff_spin_mod_off_mag(lamb, model, m_spring_spin_k, spin_ref_s0, spin_map, spin_mod_style, spin_lj_core, spin_poly_core)
     else:
         raise RuntimeError(f"unknown step: {step}")
 
@@ -391,19 +451,15 @@ def _expand_type_param(value, ntypes, name):
 
 
 def _get_spin_ref_params(jdata, mass_map, spin_mass, spin_map):
-    """Return spring reference parameters as (k_by_type, s0_by_type)."""
+    """Return (style, k_by_type, s0_by_type) for the spin reference."""
     ntypes = len(mass_map)
     spin_ref = jdata.get("spin_ref")
     if spin_ref is not None:
         style = spin_ref.get("style", "spring")
-        if str(style).lower() not in ("spring", "harmonic"):
-            raise RuntimeError("spin_ref.style must be 'spring'")
         k_by_type = _expand_type_param(spin_ref.get("k", 0.0), ntypes, "spin_ref.k")
         s0_by_type = _expand_type_param(spin_ref.get("s0", 0.0), ntypes, "spin_ref.s0")
     else:
         style = jdata.get("spin_mod_style", "spring")
-        if str(style).lower() not in ("spring", "harmonic"):
-            raise RuntimeError("spin_mod_style must be 'spring'")
         spin_mod_k = jdata.get("spin_mod_k", 0.0)
         base_k = _expand_type_param(spin_mod_k, ntypes, "spin_mod_k")
         # Legacy spin_mod_k followed hti_mag and was scaled by atom mass and spin mass.
@@ -411,7 +467,7 @@ def _get_spin_ref_params(jdata, mass_map, spin_mass, spin_map):
         s0_by_type = _expand_type_param(jdata.get("spin_mod_s0", 0.0), ntypes, "spin_mod_s0")
 
     k_by_type = [k_by_type[i] if spin_map[i] else 0.0 for i in range(ntypes)]
-    return k_by_type, s0_by_type
+    return style, k_by_type, s0_by_type
 
 
 def _make_tasks(iter_name, jdata, step):
@@ -426,8 +482,10 @@ def _make_tasks(iter_name, jdata, step):
     mass_map = get_first_matched_key_from_dict(jdata, ["mass_map", "model_mass_map"])
     spin_mass = get_first_matched_key_from_dict(jdata, ["spin_mass", "sp_mass"])
     spin_map = get_first_matched_key_from_dict(jdata, ["spin_map", "sp_map"])
+    spin_lj_core = jdata.get("spin_lj_core", None)
+    spin_poly_core = jdata.get("spin_poly_core", None)
     ntypes = len(mass_map)
-    m_spring_spin_k, spin_ref_s0 = _get_spin_ref_params(
+    spin_mod_style, m_spring_spin_k, spin_ref_s0 = _get_spin_ref_params(
         jdata, mass_map, spin_mass, spin_map
     )
 
@@ -479,6 +537,9 @@ def _make_tasks(iter_name, jdata, step):
             spin_ref_s0=spin_ref_s0,
             spin_map=spin_map,
             spring_lambda_mode=spring_lambda_mode,
+            spin_mod_style=spin_mod_style,
+            spin_lj_core=spin_lj_core,
+            spin_poly_core=spin_poly_core,
             nsteps=nsteps,
             timestep=timestep,
             ens=ens,
