@@ -398,6 +398,77 @@ def npt_equi_conf(npt_dir):
     return conf_lmp
 
 
+def _relabel_avgposi(dump_lines):
+    for idx, line in enumerate(dump_lines):
+        if "ITEM: ATOMS" in line:
+            line = line.replace("f_ap[1]", "x")
+            line = line.replace("f_ap[2]", "y")
+            line = line.replace("f_ap[3]", "z")
+            dump_lines[idx] = line
+    return dump_lines
+
+
+def npt_avg_ref_conf(npt_dir, spin_dir=None):
+    """Build the HTI reference configuration (frozen background) from equi runs.
+
+    - cell: block-averaged NPT cell (thermo lx ly lz xy xz yz)
+    - lattice positions: time-averaged positions (dump.avgposi, fix ave/atom),
+      wrapped into the averaged cell
+    - spins: last frame of dump.equi, taken from spin_dir (e.g. an NVT
+      confirmation run at the averaged cell) if given, else from npt_dir
+
+    Requires the NPT run to be generated with if_dump_avg_posi=true.
+    Returns the configuration as a LAMMPS data string (with spins if present).
+    """
+    thermo_file = os.path.join(npt_dir, "log.lammps")
+    avgposi_file = os.path.join(npt_dir, "dump.avgposi")
+    j_file = os.path.join(npt_dir, "equi_settings.json")
+    with open(j_file) as f:
+        jdata = json.load(f)
+    stat_skip = jdata["stat_skip"]
+    stat_bsize = jdata["stat_bsize"]
+
+    data = get_thermo(thermo_file)
+    lx, _ = block_avg(data[:, 8], skip=stat_skip, block_size=stat_bsize)
+    ly, _ = block_avg(data[:, 9], skip=stat_skip, block_size=stat_bsize)
+    lz, _ = block_avg(data[:, 10], skip=stat_skip, block_size=stat_bsize)
+    xy, _ = block_avg(data[:, 11], skip=stat_skip, block_size=stat_bsize)
+    xz, _ = block_avg(data[:, 12], skip=stat_skip, block_size=stat_bsize)
+    yz, _ = block_avg(data[:, 13], skip=stat_skip, block_size=stat_bsize)
+
+    last_avg = _relabel_avgposi(get_last_dump(avgposi_file).split("\n"))
+    sys_data = system_data(last_avg)
+
+    spin_source = spin_dir if spin_dir is not None else npt_dir
+    last_equi = get_last_dump(os.path.join(spin_source, "dump.equi")).split("\n")
+    spin_sys = system_data(last_equi)
+    if "spins" in spin_sys:
+        if len(spin_sys["spins"]) != sum(sys_data["atom_numbs"]):
+            raise RuntimeError(
+                "natoms mismatch between dump.avgposi ({}) and spin dump.equi ({})".format(
+                    sum(sys_data["atom_numbs"]), len(spin_sys["spins"])
+                )
+            )
+        sys_data["spins"] = spin_sys["spins"]
+
+    sys_data["cell"][0][0] = lx
+    sys_data["cell"][1][1] = ly
+    sys_data["cell"][2][2] = lz
+    sys_data["cell"][1][0] = xy
+    sys_data["cell"][2][0] = xz
+    sys_data["cell"][2][1] = yz
+
+    # averaged positions come unwrapped (xu yu zu); wrap into the averaged cell
+    cell = np.array(sys_data["cell"])
+    orig = np.array(sys_data["orig"])
+    frac = np.linalg.solve(cell.T, (sys_data["coordinates"] - orig).T).T
+    frac = frac % 1.0
+    sys_data["coordinates"] = frac @ cell + orig
+
+    conf_lmp = from_system_data(sys_data)
+    return conf_lmp
+
+
 def extract(job_dir, output):
     dump_file = os.path.join(job_dir, "dump.avgposi")
     if os.path.isfile(dump_file):
