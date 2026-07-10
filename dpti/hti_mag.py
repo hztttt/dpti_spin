@@ -461,6 +461,12 @@ def _ff_two_steps(
     if_harmonic=False,
     m_target_spring_k=None,
     m_target_spring_spin_k=None,
+    couple_c=0.0,
+    zeeman_B=0.0,
+    zeeman_dir=(0.0, 0.0, 1.0),
+    magvol_lambda=0.0,
+    magvol_v0=0.0,
+    magvol_s0=0.0,
 ):
     ret = ""
     ret += "# --------------------- FORCE FIELDS ---------------------\n"
@@ -564,9 +570,37 @@ def _ff_two_steps(
             k2_spin_const = m_target_spring_spin_k[ii] * lamb if var_deep else m_target_spring_spin_k[ii]
             ret += f"fix             l_k2_spring_spin_{ii+1} type_{ii+1} spring/spin {k2_spin_const:.10e}\n"
             ret += f"fix_modify      l_k2_spring_spin_{ii+1} energy yes\n"
-        sum_str = "+".join(
-            [f"f_l_k2_spring_{ii+1}+f_l_k2_spring_spin_{ii+1}" for ii in range(ntypes)]
-        )
+        sum_terms = [
+            f"f_l_k2_spring_{ii+1}+f_l_k2_spring_spin_{ii+1}" for ii in range(ntypes)
+        ]
+        # on-site lattice-spin coupling: part of the *target* system Hamiltonian.
+        # scaled by lambda in deep_on (so its switch-on work is captured by the
+        # deep_on integrand <e_k2_spring>/lambda), full strength during spring_off.
+        # E_couple = c * sum_i (dr_i . ds_i); frozen-DOF modes give dr.ds=0 -> no effect.
+        if couple_c:
+            c_const = couple_c * lamb if var_deep else couple_c
+            ret += f"fix             l_couple all couple/spin/lattice {c_const:.10e}\n"
+            ret += "fix_modify      l_couple energy yes\n"
+            sum_terms.append("f_l_couple")
+        # external Zeeman field (eV/mu_B units), part of the *target* Hamiltonian.
+        # scaled by lambda in deep_on (switch-on work captured by integrand), full otherwise.
+        if zeeman_B:
+            b_const = zeeman_B * lamb if var_deep else zeeman_B
+            nx, ny, nz = zeeman_dir
+            ret += f"fix             l_zeeman all zeeman/ev {b_const:.10e} {nx:.8f} {ny:.8f} {nz:.8f}\n"
+            ret += "fix_modify      l_zeeman energy yes\n"
+            sum_terms.append("f_l_zeeman")
+        # magneto-volume coupling U_mv = lambda_mv*(V-V0)/V0 * sum_i(|s_i|^2 - s0^2),
+        # part of the *target* Hamiltonian (spin-dependent even at fixed V). lambda-scaled
+        # in deep_on (switch-on work captured by <e_k2_spring>/lambda), full in spring_off.
+        # Note: the pure-volume EOS term U_eos(V) is a constant at fixed V (NVT HTI) and is
+        # added analytically by the driver, so it is NOT injected here.
+        if magvol_lambda:
+            mv_const = magvol_lambda * lamb if var_deep else magvol_lambda
+            ret += f"fix             l_magvol all magvol {mv_const:.10e} {magvol_v0:.10e} {magvol_s0:.10e}\n"
+            ret += "fix_modify      l_magvol energy yes\n"
+            sum_terms.append("f_l_magvol")
+        sum_str = "+".join(sum_terms)
         ret += f"variable        e_k2_spring equal {sum_str}\n"
     else:
         if var_deep:
@@ -614,6 +648,12 @@ def _gen_lammps_input(
     if_harmonic=False,
     m_target_spring_k=None,
     m_target_spring_spin_k=None,
+    couple_c=0.0,
+    zeeman_B=0.0,
+    zeeman_dir=(0.0, 0.0, 1.0),
+    magvol_lambda=0.0,
+    magvol_v0=0.0,
+    magvol_s0=0.0,
 ):
     ret = ""
     ret += "clear\n"
@@ -662,6 +702,12 @@ def _gen_lammps_input(
             if_harmonic=if_harmonic,
             m_target_spring_k=m_target_spring_k,
             m_target_spring_spin_k=m_target_spring_spin_k,
+            couple_c=couple_c,
+            zeeman_B=zeeman_B,
+            zeeman_dir=zeeman_dir,
+            magvol_lambda=magvol_lambda,
+            magvol_v0=magvol_v0,
+            magvol_s0=magvol_s0,
         )
     elif switch == "three-step":
         ret += _ff_soft_lj(
@@ -746,6 +792,13 @@ def _gen_lammps_input(
         )
     elif lattice_flag:
         ret += "velocity        all create ${TEMP} %d\n" % (
+            np.random.default_rng().integers(1, 2**16)
+        )
+    elif spin_flag:
+        # spin_only (lattice frozen): the spins still need an initial thermal velocity --
+        # langevin/spin alone does not kick them off zero, so without this the spins stay
+        # cold and the spin-spring switching work comes out ~0.
+        ret += "velocity        all create ${TEMP} %d spin yes spmass ${SP_MASS}\n" % (
             np.random.default_rng().integers(1, 2**16)
         )
     if crystal == "frenkel":
@@ -1013,6 +1066,12 @@ def _make_tasks(
             m_spring_spin_k = [0.0 for _ in mass_map]
     m_target_spring_k = None
     m_target_spring_spin_k = None
+    couple_c = jdata.get("couple_c", 0.0)
+    zeeman_B = jdata.get("zeeman_B", 0.0)
+    zeeman_dir = jdata.get("zeeman_dir", (0.0, 0.0, 1.0))
+    magvol_lambda = jdata.get("magvol_lambda", 0.0)
+    magvol_v0 = jdata.get("magvol_v0", 0.0)
+    magvol_s0 = jdata.get("magvol_s0", 0.0)
     if if_harmonic:
         target_spring_k = jdata["target_spring_k"]
         target_spring_spin_k = jdata["target_spring_spin_k"]
@@ -1129,6 +1188,12 @@ def _make_tasks(
                 if_harmonic=if_harmonic,
                 m_target_spring_k=m_target_spring_k,
                 m_target_spring_spin_k=m_target_spring_spin_k,
+                couple_c=couple_c,
+                zeeman_B=zeeman_B,
+                zeeman_dir=zeeman_dir,
+                magvol_lambda=magvol_lambda,
+                magvol_v0=magvol_v0,
+                magvol_s0=magvol_s0,
             )
         elif ref == "ideal":
             raise RuntimeError("choose hti_liq.py")

@@ -317,8 +317,8 @@ def _make_tasks_rev(
     create_path(iter_name)
 
     # Copy/link conf and model into iter_name
-    copied_conf  = os.path.join(os.path.abspath(iter_name), "conf.lmp")
     model_name   = os.path.basename(model)
+    copied_conf  = os.path.join(os.path.abspath(iter_name), "conf.lmp")
     linked_model = os.path.join(os.path.abspath(iter_name), model_name)
     if not link:
         shutil.copyfile(equi_conf, copied_conf)
