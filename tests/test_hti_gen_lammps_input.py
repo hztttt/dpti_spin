@@ -58,6 +58,7 @@ class TestHtiGenLammpsInput(unittest.TestCase):
         units           metal
         boundary        p p p
         atom_style      atomic
+        atom_modify     map yes
         # --------------------- ATOM DEFINITION ------------------
         box             tilt large
         read_data       conf.lmp
@@ -142,6 +143,7 @@ class TestHtiGenLammpsInput(unittest.TestCase):
         units           metal
         boundary        p p p
         atom_style      atomic
+        atom_modify     map yes
         # --------------------- ATOM DEFINITION ------------------
         box             tilt large
         read_data       conf.lmp
@@ -227,6 +229,7 @@ class TestHtiGenLammpsInput(unittest.TestCase):
         units           metal
         boundary        p p p
         atom_style      atomic
+        atom_modify     map yes
         # --------------------- ATOM DEFINITION ------------------
         box             tilt large
         read_data       conf.lmp
@@ -312,6 +315,7 @@ class TestHtiGenLammpsInput(unittest.TestCase):
         units           metal
         boundary        p p p
         atom_style      atomic
+        atom_modify     map yes
         # --------------------- ATOM DEFINITION ------------------
         box             tilt large
         read_data       conf.lmp
@@ -398,6 +402,7 @@ class TestHtiGenLammpsInput(unittest.TestCase):
         units           metal
         boundary        p p p
         atom_style      atomic
+        atom_modify     map yes
         # --------------------- ATOM DEFINITION ------------------
         box             tilt large
         read_data       conf.lmp

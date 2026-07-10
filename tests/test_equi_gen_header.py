@@ -39,6 +39,7 @@ class TestEquiHeader(unittest.TestCase):
         units           metal
         boundary        p p p
         atom_style      atomic
+        atom_modify     map yes
         # --------------------- ATOM DEFINITION ------------------
         box             tilt large
         read_data       conf.lmp
@@ -84,6 +85,7 @@ class TestEquiHeader(unittest.TestCase):
         units           metal
         boundary        p p p
         atom_style      atomic
+        atom_modify     map yes
         # --------------------- ATOM DEFINITION ------------------
         box             tilt large
         read_data       conf.lmp
@@ -121,6 +123,7 @@ class TestEquiHeader(unittest.TestCase):
         units           metal
         boundary        p p p
         atom_style      atomic
+        atom_modify     map yes
         # --------------------- ATOM DEFINITION ------------------
         box             tilt large
         read_data       conf.lmp
@@ -158,6 +161,7 @@ class TestEquiHeader(unittest.TestCase):
         units           metal
         boundary        p p p
         atom_style      atomic
+        atom_modify     map yes
         # --------------------- ATOM DEFINITION ------------------
         box             tilt large
         read_data       conf.lmp

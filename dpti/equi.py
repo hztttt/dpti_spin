@@ -73,8 +73,10 @@ def gen_equi_header(
     ret += "boundary        p p p\n"
     if is_spin:
         ret += "atom_style      spin\n"
+        ret += "atom_modify     map yes\n"
     else:
         ret += "atom_style      atomic\n"
+        ret += "atom_modify     map yes\n"
     ret += "# --------------------- ATOM DEFINITION ------------------\n"
     ret += "box             tilt large\n"
     ret += f"read_data       {equi_conf}\n"

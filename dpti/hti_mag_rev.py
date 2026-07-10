@@ -177,6 +177,7 @@ def _gen_lammps_input_rev(
     ret += "units           metal\n"
     ret += "boundary        p p p\n"
     ret += "atom_style      spin\n"
+    ret += "atom_modify     map yes\n"
     ret += "# --------------------- ATOM DEFINITION ------------------\n"
     ret += "box             tilt large\n"
     ret += f"read_data       {conf_file}\n"
