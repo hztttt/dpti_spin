@@ -19,7 +19,7 @@ def get_nspins(filename, natoms):
     if len(lines[-natoms].split()) < 9:
         raise RuntimeError("the last natoms lines in " + filename + " should contain 9 columns at least")
     for ii in lines[-natoms:]:
-        if int(ii.split()[-1]) != 0:
+        if float(ii.split()[-1]) != 0:
             nspins += 1
     return nspins
 
