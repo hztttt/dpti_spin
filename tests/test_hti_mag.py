@@ -420,3 +420,45 @@ class TestIntegrandFormulasFwd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. real-model (non-harmonic) Zeeman regularization field
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFfTwoStepsZeemanRealModel(unittest.TestCase):
+    """zeeman_B with a real model: lambda-scaled in deep_on (switch-on work in
+    the integrand via v_e_deep_tot), full strength in spring_off."""
+
+    def setUp(self):
+        self.lamb = 0.4
+        self.kw = dict(
+            spin_reference="vector",
+            zeeman_B=0.001,
+            zeeman_dir=(0.0, 0.0, 1.0),
+        )
+
+    def test_deep_on_zeeman_lambda_scaled(self):
+        out = _ff_two_steps(
+            self.lamb, "graph.pb", [1.0], [0.5], "deep_on", **self.kw
+        )
+        self.assertIn(f"zeeman/ev {0.001 * self.lamb:.10e}", out)
+        self.assertIn("fix_modify      l_zeeman energy yes", out)
+        self.assertIn("variable        e_deep_tot equal c_e_deep+f_l_zeeman", out)
+
+    def test_spring_off_zeeman_full_strength(self):
+        out = _ff_two_steps(
+            self.lamb, "graph.pb", [1.0], [0.5], "spring_off", **self.kw
+        )
+        self.assertIn(f"zeeman/ev {0.001:.10e}", out)
+
+    def test_no_zeeman_no_fix(self):
+        out = _ff_two_steps(0.4, "graph.pb", [1.0], [0.5], "deep_on")
+        self.assertNotIn("zeeman/ev", out)
+        self.assertNotIn("e_deep_tot", out)
+
+    def test_couple_c_real_model_raises(self):
+        with self.assertRaises(RuntimeError):
+            _ff_two_steps(
+                0.4, "graph.pb", [1.0], [0.5], "deep_on", couple_c=1.0
+            )

@@ -603,12 +603,29 @@ def _ff_two_steps(
         sum_str = "+".join(sum_terms)
         ret += f"variable        e_k2_spring equal {sum_str}\n"
     else:
+        if couple_c or magvol_lambda:
+            raise RuntimeError(
+                "couple_c/magvol are analytic-toy target terms: only supported "
+                "with harmonic=true (their switch-on work is summed into "
+                "e_k2_spring); with a real model they would be silently "
+                "dropped from the deep_on integrand"
+            )
         if var_deep:
             if if_meam:
                 ret += "fix             l_deep all adapt 1 pair meam scale * * v_LAMBDA\n"
             else:
                 ret += "fix             l_deep all adapt 1 pair deepspin scale * * v_LAMBDA\n"
         ret += "compute         e_deep all pe pair\n"
+        # external Zeeman field (eV/mu_B) on the *target* Hamiltonian with a
+        # real model: lambda-scaled in deep_on so its switch-on work enters
+        # the integrand <(c_e_deep + f_l_zeeman)>/lambda, full strength during
+        # spring_off (constant term, not part of dH/dlambda there).
+        if zeeman_B:
+            b_const = zeeman_B * lamb if var_deep else zeeman_B
+            nx, ny, nz = zeeman_dir
+            ret += f"fix             l_zeeman all zeeman/ev {b_const:.10e} {nx:.8f} {ny:.8f} {nz:.8f}\n"
+            ret += "fix_modify      l_zeeman energy yes\n"
+            ret += "variable        e_deep_tot equal c_e_deep+f_l_zeeman\n"
     ret += "compute         spin all property/atom sp spx spy spz fmx fmy fmz\n"
     return ret
 
@@ -734,7 +751,12 @@ def _gen_lammps_input(
     if spin_reference == "modulus":
         ret += "compute         spinmodmsd all msd/spin/mod\n"
         spin_msd_col += " c_spinmodmsd"
-    e_deep_col = "v_e_k2_spring" if if_harmonic else "c_e_deep"
+    if if_harmonic:
+        e_deep_col = "v_e_k2_spring"
+    elif zeeman_B:
+        e_deep_col = "v_e_deep_tot"
+    else:
+        e_deep_col = "c_e_deep"
     if 1 - lamb != 0:
         if not isinstance(m_spring_k, list):
             if switch == "three-step":
