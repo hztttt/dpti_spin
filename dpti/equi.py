@@ -130,7 +130,11 @@ def gen_equi_thermo_settings(timestep, is_spin=False):
     if is_spin:
         ret += "compute         spin all property/atom sp spx spy spz fmx fmy fmz\n"
         ret += "compute         spinmsd all msd/spin\n"
-        ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol lx ly lz xy xz yz pxx pyy pzz pxy pxz pyz c_allmsd[*] c_spinmsd[*]\n"
+        # both spin-fluctuation channels are always emitted so either HTI
+        # reference can be matched from the same equi run: c_spinmsd (vector,
+        # full spin vector) and c_spinmodmsd (modulus, |S| only)
+        ret += "compute         spinmodmsd all msd/spin/mod\n"
+        ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol lx ly lz xy xz yz pxx pyy pzz pxy pxz pyz c_allmsd[*] c_spinmsd[*] c_spinmodmsd\n"
     else:
         ret += "thermo_style    custom step ke pe etotal enthalpy temp press vol lx ly lz xy xz yz pxx pyy pzz pxy pxz pyz c_allmsd[*]\n"
     return ret
