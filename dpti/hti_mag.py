@@ -1066,8 +1066,15 @@ def _make_tasks(
     if crystal == "frenkel":
         m_spring_k = []
         m_spring_spin_k = []
-        for ii in mass_map:
-            m_spring_k.append(spring_k * ii)
+        # spring_k scalar -> shared Einstein frequency (k_i = spring_k * m_i);
+        # spring_k list   -> per-type spring constants k_i [eV/A^2] taken as given.
+        # einstein.frenkel() carries the matching generalised centre-of-mass correction.
+        if isinstance(spring_k, list):
+            assert len(spring_k) == len(mass_map)
+            m_spring_k = list(spring_k)
+        else:
+            for ii in mass_map:
+                m_spring_k.append(spring_k * ii)
         if spin_reference == "vector":
             for ii in mass_map:
                 m_spring_spin_k.append(spring_spin_k * ii * spin_mass) # ensure different spring for magnetic atoms. mark

@@ -258,14 +258,18 @@ def frenkel(job):
     temp = jdata["temp"]
     # mass_map = jdata['mass_map']
     mass_map = get_first_matched_key_from_dict(jdata, ["mass_map", "model_mass_map"])
-    s_spring_k = jdata["spring_k"]
     spring_k = jdata["spring_k"]
-    assert not isinstance(spring_k, list)
-    if not isinstance(spring_k, list):
-        m_spring_k = []
-        for ii in mass_map:
-            m_spring_k.append(spring_k * ii)
-        # spring_k = spring_k_1
+    # spring_k SCALAR  -> shared Einstein frequency: k_i = spring_k * m_i  (omega^2 = spring_k)
+    # spring_k LIST    -> per-type spring constants k_i [eV/A^2] given directly.  Needed when
+    #   one species sits in a much stiffer well than the rest: in bcc Fe+C the interstitial C
+    #   is clamped by six Fe neighbours, so its measured <dr^2> is only 1.2x that of Fe, not
+    #   the 4.65x a shared omega would impose on a 12 amu atom.  A shared omega therefore
+    #   hands C a reference well ~3.2x too wide, which costs reference/target overlap.
+    if isinstance(spring_k, list):
+        assert len(spring_k) == len(mass_map)
+        m_spring_k = list(spring_k)
+    else:
+        m_spring_k = [spring_k * ii for ii in mass_map]
     if "copies" in jdata:
         ncopies = np.prod(jdata["copies"])
     else:
@@ -279,23 +283,25 @@ def frenkel(job):
 
     Lambda_k = [compute_lambda(temp, ii) for ii in mass_map]
     Lambda_s = [compute_spring(temp, ii) for ii in m_spring_k]
-    s_Lambda_s = compute_spring(temp, s_spring_k) # s_spring_k 和 spring_k的区别? 
 
     fe = 0
     sum_m = 0
-    fact = pc.Boltzmann * temp / pc.electron_volt / np.sum(natoms)
+    inv_k_m2 = 0.0
     for idx, ii in enumerate(natoms):
         fe += 3.0 * ii * np.log(Lambda_k[idx]) # -ln[(1/\Lambda)^(3N)] = 3N ln(\Lambda)
         fe += 3.0 * ii * np.log(Lambda_s[idx]) # -ln(\frac{\pi}{\beta E}^{3(N)/2}) = 3N/2 ln(\frac{\beta E}{\pi})
-        # print(idx)
-        # print(3.0 * ii * np.log(Lambda_k[idx]) * fact)
-        # print(3.0 * ii * np.log(Lambda_s[idx]) * fact)
-        sum_m += mass_map[idx] * ii # 为什么这里是原子质量乘以原子数目? 公式对应ln(N^(3/2)) 是因为在de Broglie wavelength引入了质量?
-    fe -= 3.0 * np.log(s_Lambda_s)
-    fe -= 1.5 * np.log(sum_m)
-    # fe += 2.0 * np.log(np.sum(natoms)/3.0)
-    # print('# FS corr (does not apply)', 2.0 * np.log(np.sum(natoms)/3.0) *pc.Boltzmann * temp / pc.electron_volt / np.sum(natoms) * 3.0)
-    # print((3.0 * np.log(s_Lambda_s) + 1.5 * np.log(sum_m)) * fact)
+        sum_m += mass_map[idx] * ii
+        inv_k_m2 += ii * mass_map[idx] ** 2 / m_spring_k[idx]
+
+    # Centre-of-mass correction for the Frenkel molecule.  Integrating the Einstein
+    # Gaussian against delta^3(R_CM) gives, for ARBITRARY per-type spring constants k_i,
+    #     F_CM / kT = -3 ln Lambda_s(K_CM),   K_CM = M^2 / sum_i n_i m_i^2 / k_i
+    # with M = sum_i n_i m_i.  The previous code hard-coded the special case k_i = m_i w^2,
+    # for which sum_i n_i m_i^2/k_i = M/w^2 and hence K_CM = M w^2 -- exactly the old
+    # `-3 ln Lambda_s(w^2) - 1.5 ln M`.  The general form is therefore an exact
+    # generalisation, not an approximation, and reduces to the old one bit-for-bit.
+    k_cm = sum_m**2 / inv_k_m2
+    fe -= 3.0 * np.log(compute_spring(temp, k_cm))
     fe += np.log(np.sum(natoms) / (vol * (pc.angstrom**3)))
     # print(np.log(np.sum(natoms) / (vol * (pc.angstrom**3))) * fact, np.log(np.sum(natoms) / 3.0 / (vol * (pc.angstrom**3))) * fact)
 
