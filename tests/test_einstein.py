@@ -287,6 +287,14 @@ class TestMagneticFrenkel(unittest.TestCase):
             cleanup()
         self.assertAlmostEqual(fe_ref, fe_alias, places=12)
 
+    def test_magnetic_frenkel_accepts_per_type_lattice_springs(self):
+        tmp, cleanup = self._make_tmp_job(extra_keys={"spring_k": [0.12 * 55.845]})
+        try:
+            expected = frenkel(tmp) + (magnetic_frenkel(_MAG_FRENKEL_DIR) - frenkel(_MAG_FRENKEL_DIR))
+            self.assertAlmostEqual(magnetic_frenkel(tmp), expected, places=12)
+        finally:
+            cleanup()
+
     def test_missing_spring_spin_k_raises(self):
         # get_first_matched_key_from_dict raises KeyError when no key found;
         # the ValueError guard in magnetic_frenkel covers the None case.

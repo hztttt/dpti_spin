@@ -370,19 +370,20 @@ def _ff_spring_spin(lamb, m_spring_spin_k, var_spring, enabled=True):
     if not enabled:
         ret += "variable        l_spring_spin equal 0.0\n"
         return ret
-    ntypes = len(m_spring_spin_k)
-    for ii in range(ntypes):
+    active_types = [ii for ii, value in enumerate(m_spring_spin_k) if value > 0.0]
+    if not active_types:
+        ret += "variable        l_spring_spin equal 0.0\n"
+        return ret
+    for ii in active_types:
         ret += f"group           type_{ii + 1} type {ii + 1}\n"
-    for ii in range(ntypes):
+    for ii in active_types:
         if var_spring:
             m_spring_const = m_spring_spin_k[ii] * (1 - lamb)
         else:
             m_spring_const = m_spring_spin_k[ii]
         ret += f"fix             l_spring_spin_{ii + 1} type_{ii + 1} spring/spin {m_spring_const:.10e}\n"
         ret += "fix_modify      l_spring_spin_%s energy yes\n" % (ii + 1)
-    sum_str = "f_l_spring_spin_1"
-    for ii in range(1, ntypes):
-        sum_str += "+f_l_spring_spin_%s" % (ii + 1)
+    sum_str = "+".join("f_l_spring_spin_%s" % (ii + 1) for ii in active_types)
     ret += f"variable        l_spring_spin equal {sum_str}\n"
     return ret
 
@@ -1048,7 +1049,7 @@ def _make_tasks(
     jdata["spin_reference"] = spin_reference
     spin_map = None
     spin_ref_s0 = None
-    if spin_reference == "modulus":
+    if spin_reference in ("vector", "modulus"):
         spin_map = get_first_matched_key_from_dict(jdata, ["spin_map", "sp_map"])
 
     nsteps = jdata["nsteps"]
@@ -1076,8 +1077,10 @@ def _make_tasks(
             for ii in mass_map:
                 m_spring_k.append(spring_k * ii)
         if spin_reference == "vector":
-            for ii in mass_map:
-                m_spring_spin_k.append(spring_spin_k * ii * spin_mass) # ensure different spring for magnetic atoms. mark
+            m_spring_spin_k = [
+                spring_spin_k * mass * spin_mass if spin_map[ii] else 0.0
+                for ii, mass in enumerate(mass_map)
+            ]
         elif spin_reference == "modulus":
             _, m_spring_spin_k, spin_ref_s0 = _get_spin_ref_params(
                 jdata, mass_map, spin_mass, spin_map

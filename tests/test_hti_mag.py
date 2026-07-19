@@ -93,6 +93,12 @@ class TestFfSpringSpinFwd(unittest.TestCase):
         self.assertIn("l_spring_spin equal 0.0", result)
         self.assertNotIn("spring/spin", result)
 
+    def test_zero_k_nonmagnetic_type_is_omitted(self):
+        result = _ff_spring_spin(0.5, [5.0, 0.0], var_spring=True)
+        self.assertIn("type_1 spring/spin", result)
+        self.assertNotIn("type_2", result)
+        self.assertIn("l_spring_spin equal f_l_spring_spin_1", result)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. _get_spring_lambda_mode: alias resolution

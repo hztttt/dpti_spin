@@ -319,6 +319,11 @@ def magnetic_frenkel(job):
     with open(os.path.join(job, "in.json")) as f:
         jdata = json.load(f)
 
+    temp = jdata["temp"]
+    mass_map = get_first_matched_key_from_dict(jdata, ["mass_map", "model_mass_map"])
+    spin_mass = get_first_matched_key_from_dict(jdata, ["spin_mass_map", "sp_mass_map", "spin_mass"])
+    spin_map = get_first_matched_key_from_dict(jdata, ["spin_map", "sp_map"])
+
     equi_conf = jdata["equi_conf"]
     cwd = os.getcwd()
     os.chdir(job)
@@ -326,14 +331,6 @@ def magnetic_frenkel(job):
     equi_conf = os.path.abspath(equi_conf)
     os.chdir(cwd)
 
-    temp = jdata["temp"]
-    mass_map = get_first_matched_key_from_dict(jdata, ["mass_map", "model_mass_map"])
-    spin_mass = get_first_matched_key_from_dict(jdata, ["spin_mass_map", "sp_mass_map", "spin_mass"])
-    spin_map = get_first_matched_key_from_dict(jdata, ["spin_map", "sp_map"])
-
-    spring_k = jdata["spring_k"]
-    assert not isinstance(spring_k, list)
-    m_spring_k = [spring_k * ii for ii in mass_map]
     spring_spin_k = get_first_matched_key_from_dict(
         jdata, ["spin_spring_k", "s_spring_k", "spring_k_spin", "spring_spin_k"]
     )
@@ -341,8 +338,6 @@ def magnetic_frenkel(job):
         raise ValueError(
             "magnetic_frenkel requires explicit `spin_spring_k` (or `s_spring_k`/`spring_k_spin`) in in.json"
         )
-    m_spring_spin_k = [spring_spin_k * ii * spin_mass for ii in mass_map]
-
     spin_model = str(jdata.get("spin_model", "tspin")).lower()
     if spin_model not in ["tspin", "llg"]:
         raise ValueError("spin_model must be either 'tspin' or 'llg'")
@@ -358,33 +353,21 @@ def magnetic_frenkel(job):
     with open(equi_conf) as f:
         sys_data = lmp.to_system_data(f.read().split("\n"))
 
-    vol = np.linalg.det(sys_data["cell"])
     natoms = [ii * ncopies for ii in sys_data["atom_numbs"]]
     total_atoms = np.sum(natoms)
 
-    Lambda_k = [compute_lambda(temp, ii) for ii in mass_map]
-    Lambda_E = [compute_spring(temp, ii) for ii in m_spring_k]
-    Lambda_E_cm = compute_spring(temp, spring_k)
     Lambda_S_kin = [compute_spin_lambda(temp, ii * spin_mass) for ii in mass_map]
+    m_spring_spin_k = [spring_spin_k * ii * spin_mass for ii in mass_map]
     Lambda_S_ref = [compute_spin_spring(temp, ii) for ii in m_spring_spin_k]
 
-    fe = 0.0
     sfe = 0.0
-    sum_m = 0.0
 
     for idx, ii in enumerate(natoms):
-        fe += 3.0 * ii * np.log(Lambda_k[idx])
-        fe += 3.0 * ii * np.log(Lambda_E[idx])
-        sum_m += mass_map[idx] * ii
         if spin_map[idx]:
             # magnetic contributions
             sfe += 3.0 * ii * np.log(Lambda_S_ref[idx])
             if include_spin_kinetic:
                 sfe += 3.0 * ii * np.log(Lambda_S_kin[idx])
-
-    fe -= 3.0 * np.log(Lambda_E_cm)
-    fe -= 1.5 * np.log(sum_m)
-    fe += np.log(total_atoms / (vol * (pc.angstrom**3)))
 
     # if spin_model == "tspin":
     #     fe += 3.0 * total_atoms * np.log(Lambda_S_ref)
@@ -398,12 +381,11 @@ def magnetic_frenkel(job):
     #     )
     #     fe -= total_atoms * np.log(spin_factor)
 
-    fe *= pc.Boltzmann * temp / pc.electron_volt
-    fe /= total_atoms
     sfe *= pc.Boltzmann * temp / pc.electron_volt
     sfe /= total_atoms
-    fe += sfe
-    return fe
+    # Reuse the lattice-only implementation so scalar shared-frequency and
+    # per-type Einstein springs receive exactly the same generalized CM correction.
+    return frenkel(job) + sfe
 
 
 def magnetic_frenkel_modulus(job):
