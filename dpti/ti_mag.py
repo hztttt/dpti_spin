@@ -592,6 +592,21 @@ def _thermo_inte(jdata, Eo, Eo_err, all_t, integrand, integrand_err, scheme="s")
         beta = 1.0 / all_t                     # β grid (may be inc or dec)
 
         beta_out, inte, inte_e, stat_e = integrate_range(beta, H_intg, H_intg_err, scheme)
+        # integrate_range_simpson silently drops the final interval when the number of
+        # grid points is even, so the cumulative integral stops one grid point short of
+        # the segment endpoint.  A downstream chain that anchors the next segment at
+        # this curve's last row would then mis-anchor (G at the second-to-last T taken
+        # as G at the endpoint).  Complete with a trapezoidal step, same as the p/b
+        # branch below and integrate_range_hti.
+        beta = np.asarray(beta)
+        if beta_out[-1] != beta[-1]:
+            _, i1, ie1, se1 = integrate_range(
+                beta[-2:], H_intg[-2:], H_intg_err[-2:], scheme="t"
+            )
+            beta_out = np.append(beta_out, beta[-1])
+            inte = np.append(inte, inte[-1] + i1[-1])
+            inte_e = np.append(inte_e, inte_e[-1] + ie1[-1])
+            stat_e = np.append(stat_e, np.linalg.norm([stat_e[-1], se1[-1]]))
         T_out = 1.0 / beta_out
 
         for ii in range(len(beta_out)):
