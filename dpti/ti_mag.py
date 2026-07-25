@@ -12,6 +12,12 @@ Supported paths:
   - t-ginv : temperature path on 1/T grid
   - p      : pressure path     (NPT only),   integrand = V
   - b      : magnetic-field path at fixed T/P, integrand = dE/dB
+
+Any path may additionally be run under a CONSTANT field by setting the scalar key
+`field` (with `field_unit` / `field_direction`).  The zeeman term is added with
+`fix_modify energy yes`, so it is inside PotEng/TotEng and therefore inside the
+Gibbs-Helmholtz integrand: a t/t-ginv path at fixed B propagates G(T,B), the
+potential whose field derivative is -M, on the same footing as G(T,0).
 """
 
 import glob
@@ -344,6 +350,18 @@ def make_tasks(iter_name, jdata):
     field_unit = jdata.get("field_unit", "eV/uB")
     field_direction = jdata.get("field_direction", jdata.get("field_dir", [0.0, 0.0, 1.0]))
 
+    # A CONSTANT field held on while some other coordinate is integrated (the T path at
+    # fixed B).  `path='b'` sweeps the field and takes it from `field_seq` instead, so
+    # the two keys are mutually exclusive -- accepting both would silently let the
+    # sweep value win and produce a curve labelled with a field it never ran at.
+    fixed_field = jdata.get("field", None)
+    if fixed_field is not None:
+        if path == "b":
+            raise RuntimeError(
+                "path='b' sweeps the field via 'field_seq'; remove the constant 'field' key"
+            )
+        fixed_field = float(fixed_field)
+
     if "nvt" in ens:
         if path == "t":
             temp_seq = get_first_matched_key_from_dict(jdata, ["temp_seq", "temps"])
@@ -414,6 +432,16 @@ def make_tasks(iter_name, jdata):
             magvol_v0=jdata.get("magvol_v0", 0.0),
             magvol_s0=jdata.get("magvol_s0", 0.0),
         )
+        # Empty unless a constant field was requested, so the no-field call sites keep
+        # `field=None` and emit no zeeman fix at all.  Note `field=0.0` is NOT the same
+        # as absent: it emits the fix at zero strength, which is the null control that
+        # must reproduce the plain B=0 curve.
+        _fixed_field_kw = (
+            {}
+            if fixed_field is None
+            else dict(field=fixed_field, field_unit=field_unit,
+                      field_direction=field_direction)
+        )
         if "nvt" in ens and path == "t":
             lmp_str = _gen_lammps_input(
                 os.path.basename(equi_conf),
@@ -432,6 +460,7 @@ def make_tasks(iter_name, jdata):
                 spin_flag=spin_flag,
                 custom_variables=custom_variables,
                 append=append,
+                **_fixed_field_kw,
                 **_harmonic_kw,
             )
             thermo_out = temp_list[ii]
@@ -479,6 +508,7 @@ def make_tasks(iter_name, jdata):
                 spin_flag=spin_flag,
                 custom_variables=custom_variables,
                 append=append,
+                **_fixed_field_kw,
                 **_harmonic_kw,
             )
             thermo_out = temp_list[ii]
@@ -624,7 +654,7 @@ def _thermo_inte(jdata, Eo, Eo_err, all_t, integrand, integrand_err, scheme="s")
                 all_press.append(
                     get_first_matched_key_from_dict(jdata, ["pres", "press"])
                 )
-            all_fields.append(None)
+            all_fields.append(jdata.get("field", None))
             all_fe.append(e1)
             all_fe_err.append(err)
             all_fe_sys_err.append(sys_err)
@@ -800,7 +830,10 @@ def post_tasks(
         all_enthalpy.append(enthalpy)
         all_msd_xyz.append(msd_xyz)
         all_msd_spin.append(msd_spin)
-        if path == "b":
+        # The three field columns (9:f_zee 10:dE/dB 11:moment) are present whenever a
+        # field was applied, sweep or constant, so a T path at fixed B reports its
+        # magnetisation too -- that is the observable the field work is actually after.
+        if path == "b" or jdata.get("field") is not None:
             field_energy, _ = block_avg(data[:, 9], skip=stat_skip, block_size=stat_bsize)
             field_moment, _ = block_avg(data[:, 11], skip=stat_skip, block_size=stat_bsize)
             all_field_energy.append(field_energy / natoms)
