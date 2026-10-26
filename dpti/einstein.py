@@ -8,6 +8,7 @@ import os
 import numpy as np
 import scipy.constants as pc
 from scipy.integrate import quad
+from scipy.special import ive
 
 # from . import lib
 from dpti.lib import lmp
@@ -83,9 +84,133 @@ def spin_ref_mean_energy(k, s0, beta):
     return 4.0 * np.pi * val / z_spin
 
 
-def spin_ref_fe_per_atom(temp, atom_numbs, spin_map, spin_ref):
+def spin_ref_landau_partition(k, s0, beta):
+    """ln I0 for the Landau modulus well, plus the (z, a, b) it was built from.
+
+    The well is written k (|S|^2 - S0^2)^2 rather than Ma-Dudarev's A S^2 + B S^4
+    (Phys. Rev. B 96, 094418 (2017), Eq. 12).  Same two-parameter family --
+    A = -2 k S0^2, B = k, minimum at S0 -- but this form has U(S0) = 0 EXACTLY, the
+    same zero convention as the harmonic modulus spring 1/2 k (|S| - S0)^2.  A
+    reference whose minimum sat at -B S0^4 would need that offset carried consistently
+    through F_ref *and* the lambda path, and getting it wrong cancels in every closure
+    and reversibility check (memory: project_decompose_reference_bookkeeping).
+    Choosing the zero away removes the trap, and is what makes the absolute free
+    energies of the two wells directly comparable.
+
+    Closed form.  With b = beta k, a = -2 beta k S0^2, z = a^2/(8b) = beta k S0^4 / 2:
+
+        Z  = 4 pi exp(-beta k S0^4) * I2,   I2 = -dI0/da,
+        I0 = int_0^inf exp(-b s^4 - a s^2) ds
+           = (pi/4) sqrt(|a|/2b) e^z [ I_{-1/4}(z) + I_{1/4}(z) ]      (a < 0 always)
+
+    Bessel, not erf: the quartic is non-elementary even on the full line, whereas the
+    harmonic case is an ordinary Gaussian made non-elementary only by the s >= 0 cut.
+
+    I_nu(z) overflows past z ~ 700, so this uses the exponentially scaled
+    ive(nu, z) = exp(-z) I_nu(z) -- which turns the e^z of the closed form into e^{2z}.
+    Returns ln I0, never I0.
+    """
+    if k <= 0.0:
+        raise ValueError("spin_ref.k must be positive for the landau spin reference")
+    if s0 <= 0.0:
+        raise ValueError("spin_ref.s0 must be positive for the landau spin reference")
+    b = beta * k
+    a = -2.0 * beta * k * s0 * s0
+    z = a * a / (8.0 * b)
+    # ive(nu, z) = exp(-z) I_nu(z), so the e^z in the closed form BECOMES e^{2z} once
+    # the scaled Bessel is substituted.  Writing +z here is the single mistake the
+    # cross-check below exists to catch -- and it did catch it, first try.
+    ln_i0 = math.log((math.pi / 4.0) * math.sqrt(abs(a) / (2.0 * b))
+                     * (ive(-0.25, z) + ive(0.25, z))) + 2.0 * z
+    return ln_i0, z, a, b
+
+
+def _spin_ref_landau_smax(k, s0, beta):
+    """|S| beyond which beta*U > 200 -- the integrand is dead there in double precision."""
+    return s0 + (200.0 / (beta * k)) ** 0.25 + 1.0
+
+
+def spin_ref_landau_lnz(k, s0, beta):
+    """ln of Z = 4 pi int_0^inf s^2 exp(-beta k (s^2-s0^2)^2) ds, by direct quadrature.
+
+    PRIMARY path.  The integrand is bounded by s^2 (the well minimum is exactly 0) and
+    dies like exp(-beta k s^4), so quadrature on a finite window is unconditionally
+    stable: no overflow, no cancellation, no large-argument Bessel.  The Bessel form
+    above is carried only as an INDEPENDENT check -- a closed form that is silently
+    wrong would shift every absolute free energy by the same amount, and no closure,
+    reversibility or path-independence test in this pipeline would see it.
+    """
+    smax = _spin_ref_landau_smax(k, s0, beta)
+    val, _ = quad(lambda s: s * s * np.exp(-beta * k * (s * s - s0 * s0) ** 2),
+                  0.0, smax, points=[s0], epsabs=0.0, epsrel=1.0e-12, limit=400)
+    return math.log(4.0 * math.pi * val)
+
+
+def spin_ref_landau_mean_energy(k, s0, beta):
+    """<U> of the Landau modulus reference, for the lambda = 0 reference-state gate.
+
+    One confined degree of freedom (the modulus; the two angular ones are free), so
+    this must come out near 1/2 kT, a little below it because the quartic wall is
+    stiffer than harmonic.  That is the check the gate actually applies.
+    """
+    smax = _spin_ref_landau_smax(k, s0, beta)
+    def w(s):
+        return np.exp(-beta * k * (s * s - s0 * s0) ** 2)
+    num, _ = quad(lambda s: k * (s * s - s0 * s0) ** 2 * s * s * w(s), 0.0, smax,
+                  points=[s0], epsabs=0.0, epsrel=1.0e-10, limit=400)
+    den, _ = quad(lambda s: s * s * w(s), 0.0, smax,
+                  points=[s0], epsabs=0.0, epsrel=1.0e-10, limit=400)
+    return num / den
+
+
+def _spin_ref_style(spin_ref):
+    """-> "harmonic" | "landau" | None (None meaning: not a modulus reference at all)."""
     style = str(spin_ref.get("style", "spring")).lower()
-    if style not in ("spring", "harmonic"):
+    if style in ("spring", "harmonic"):
+        return "harmonic"
+    if style == "landau":
+        return "landau"
+    return None
+
+
+def _spin_ref_fe_one_type(style, k, s0, beta, kbt):
+    """-kT ln Z for ONE spin type, for whichever modulus reference is in force."""
+    if style == "harmonic":
+        return -kbt * np.log(spin_ref_partition(k, s0, beta))
+
+    ln_z = spin_ref_landau_lnz(k, s0, beta)
+    # Cross-check: I2 = -dI0/da = -I0 * d(ln I0)/da, the log-derivative by a central
+    # difference on the analytic ln I0, with a relative step so it is scale-free.
+    # ln Z = ln(4 pi I2) - beta k s0^4, the last term being the exp(-beta k S0^4) that
+    # shifts the well minimum to zero.
+    #
+    # Differentiate ln I0, NOT I0: ln I0 ~ a^2/(4b) is nearly quadratic in a, so its
+    # central difference is almost exact, whereas I0 ~ e^{2z} has an O((z da/|a|)^2)
+    # truncation error that grows with the well stiffness and tripped this guard at
+    # k = 0.05, s0 = 2.46, 200 K (rel 2.7e-7) on a reference that was in fact correct.
+    a0 = -2.0 * beta * k * s0 * s0
+    da = 1.0e-5 * abs(a0)
+    b = beta * k
+
+    def _ln_i0(a_val):
+        z = a_val * a_val / (8.0 * b)
+        return math.log((math.pi / 4.0) * math.sqrt(abs(a_val) / (2.0 * b))
+                        * (ive(-0.25, z) + ive(0.25, z))) + 2.0 * z
+
+    dln_i0 = (_ln_i0(a0 + da) - _ln_i0(a0 - da)) / (2.0 * da)
+    ln_z_bessel = (math.log(4.0 * math.pi) + _ln_i0(a0) + math.log(-dln_i0)
+                   - beta * k * s0 ** 4)
+    if not math.isclose(ln_z, ln_z_bessel, rel_tol=1.0e-7, abs_tol=1.0e-9):
+        raise RuntimeError(
+            f"landau spin reference: quadrature ln Z = {ln_z!r} disagrees with the "
+            f"Bessel closed form {ln_z_bessel!r} (k={k}, s0={s0}, beta={beta}); "
+            "refusing to return a reference free energy only one of the two supports")
+    return -kbt * ln_z
+
+
+def spin_ref_fe_per_atom(temp, atom_numbs, spin_map, spin_ref):
+    style = _spin_ref_style(spin_ref)
+    if style is None:
         return 0.0
 
     ntypes = len(atom_numbs)
@@ -101,15 +226,14 @@ def spin_ref_fe_per_atom(temp, atom_numbs, spin_map, spin_ref):
     for count, is_spin, k, s0 in zip(atom_numbs, spin_map, k_by_type, s0_by_type):
         if not is_spin or count == 0:
             continue
-        z_spin = spin_ref_partition(k, s0, beta)
-        fe += (count / natoms) * (-kbt * np.log(z_spin))
+        fe += (count / natoms) * _spin_ref_fe_one_type(style, k, s0, beta, kbt)
     return float(fe)
 
 
 def spin_ref_analytic_per_atom(temp, atom_numbs, spin_map, spin_ref):
-    style = str(spin_ref.get("style", "spring")).lower()
-    if style not in ("spring", "harmonic"):
-        raise ValueError("spin_ref analytic values support only harmonic spin_ref style")
+    style = _spin_ref_style(spin_ref)
+    if style is None:
+        raise ValueError("spin_ref analytic values support only harmonic/landau style")
 
     ntypes = len(atom_numbs)
     k_by_type = _expand_type_param(spin_ref.get("k", 0.0), ntypes, "spin_ref.k")
@@ -126,9 +250,9 @@ def spin_ref_analytic_per_atom(temp, atom_numbs, spin_map, spin_ref):
     for ii, (count, is_spin, k, s0) in enumerate(zip(atom_numbs, spin_map, k_by_type, s0_by_type)):
         if not is_spin or count == 0:
             continue
-        z_spin = spin_ref_partition(k, s0, beta)
-        fe_type = -kbt * np.log(z_spin)
-        u_type = spin_ref_mean_energy(k, s0, beta)
+        fe_type = _spin_ref_fe_one_type(style, k, s0, beta, kbt)
+        u_type = (spin_ref_mean_energy(k, s0, beta) if style == "harmonic"
+                  else spin_ref_landau_mean_energy(k, s0, beta))
         weight = count / natoms
         fe += weight * fe_type
         u += weight * u_type
@@ -397,10 +521,9 @@ def magnetic_frenkel_modulus(job):
     if spin_ref is None:
         raise ValueError("magnetic_frenkel_modulus requires `spin_ref` in in.json")
 
-    spin_ref_style = str(spin_ref.get("style", "spring")).lower()
-    if spin_ref_style not in ("spring", "harmonic"):
+    if _spin_ref_style(spin_ref) is None:
         raise ValueError(
-            "magnetic_frenkel_modulus supports only harmonic/spring spin_ref style"
+            "magnetic_frenkel_modulus supports only harmonic/spring or landau spin_ref style"
         )
 
     equi_conf = jdata["equi_conf"]

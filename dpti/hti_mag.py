@@ -131,8 +131,11 @@ def _get_spin_ref_params(jdata, mass_map, spin_mass, spin_map):
         s0_by_type = _expand_type_param(jdata.get("spin_mod_s0", 0.0), ntypes, "spin_mod_s0")
 
     style = str(style).lower()
-    if style not in ("spring", "harmonic"):
-        raise RuntimeError("hti_mag spin_reference='modulus' supports only spring/harmonic spin_ref")
+    if style in ("spring", "harmonic"):
+        style = "harmonic"
+    elif style != "landau":
+        raise RuntimeError(
+            "hti_mag spin_reference='modulus' supports only spring/harmonic or landau spin_ref")
 
     k_by_type = [k_by_type[i] if spin_map[i] else 0.0 for i in range(ntypes)]
     return style, k_by_type, s0_by_type
@@ -388,7 +391,13 @@ def _ff_spring_spin(lamb, m_spring_spin_k, var_spring, enabled=True):
     return ret
 
 
-def _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode, enabled=True):
+#: LAMMPS fix style per spin_ref style.  Both fixes take exactly (k, s0), both are
+#: switched by scaling k linearly in lambda, and both have U(s0) = 0 -- so the
+#: generator below is shared and only the well shape differs:
+#:   harmonic   1/2 k (|S| - s0)^2    cusped at S = 0, force needs the unit vector
+#:   landau     k (|S|^2 - s0^2)^2    polynomial force -4k(|S|^2-s0^2)S, smooth at 0
+def _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode, enabled=True,
+                 spin_ref_style="harmonic"):
     ret = ""
     if not enabled:
         ret += "variable        l_spring_spin equal 0.0\n"
@@ -409,9 +418,12 @@ def _ff_spin_mod(lamb, m_spring_spin_k, spin_ref_s0, spin_map, mode, enabled=Tru
 
     for ii in spin_types:
         ret += f"group           type_{ii + 1} type {ii + 1}\n"
+    fix_style = {"harmonic": "spring/spin/mod", "landau": "spring/spin/landau"}.get(spin_ref_style)
+    if fix_style is None:
+        raise RuntimeError("unknown spin_ref style for the modulus reference", spin_ref_style)
     for ii in spin_types:
         m_spring_const = m_spring_spin_k[ii] * factor
-        ret += f"fix             l_spring_spin_{ii + 1} type_{ii + 1} spring/spin/mod {m_spring_const:.10e} {spin_ref_s0[ii]:.10e}\n"
+        ret += f"fix             l_spring_spin_{ii + 1} type_{ii + 1} {fix_style} {m_spring_const:.10e} {spin_ref_s0[ii]:.10e}\n"
         ret += "fix_modify      l_spring_spin_%s energy yes\n" % (ii + 1)
     sum_str = "+".join("f_l_spring_spin_%s" % (ii + 1) for ii in spin_types)
     ret += f"variable        l_spring_spin equal {sum_str}\n"
@@ -455,6 +467,7 @@ def _ff_two_steps(
     spin_ref_s0=None,
     spin_map=None,
     spin_reference="vector",
+    spin_ref_style="harmonic",
     append=None,
     if_meam=False,
     meam_model=None,
@@ -553,6 +566,7 @@ def _ff_two_steps(
             spin_map,
             spin_mod_mode,
             enabled=enable_spin_spring,
+            spin_ref_style=spin_ref_style,
         )
     elif spin_reference == "none":
         ret += "variable        l_spring_spin equal 0.0\n"
@@ -646,6 +660,7 @@ def _gen_lammps_input(
     spin_ref_s0=None,
     spin_map=None,
     spin_reference="vector",
+    spin_ref_style="harmonic",
     pres=1.0,
     tau_t=0.1,
     tau_p=0.5,
@@ -714,6 +729,7 @@ def _gen_lammps_input(
             spin_ref_s0=spin_ref_s0,
             spin_map=spin_map,
             spin_reference=spin_reference,
+            spin_ref_style=spin_ref_style,
             append=append,
             if_meam=if_meam,
             meam_model=meam_model,
@@ -1063,6 +1079,8 @@ def _make_tasks(
         )
     custom_variables = jdata.get("custom_variables", None)
     append = jdata.get("append", None)
+    # bound for every reference mode; only spin_reference="modulus" overwrites it.
+    spin_ref_style = "harmonic"
 
     if crystal == "frenkel":
         m_spring_k = []
@@ -1082,7 +1100,7 @@ def _make_tasks(
                 for ii, mass in enumerate(mass_map)
             ]
         elif spin_reference == "modulus":
-            _, m_spring_spin_k, spin_ref_s0 = _get_spin_ref_params(
+            spin_ref_style, m_spring_spin_k, spin_ref_s0 = _get_spin_ref_params(
                 jdata, mass_map, spin_mass, spin_map
             )
         else:
@@ -1092,7 +1110,7 @@ def _make_tasks(
         for ii in mass_map:
             m_spring_k.append(spring_k * ii)
         if spin_reference == "modulus":
-            _, m_spring_spin_k, spin_ref_s0 = _get_spin_ref_params(
+            spin_ref_style, m_spring_spin_k, spin_ref_s0 = _get_spin_ref_params(
                 jdata, mass_map, spin_mass, spin_map
             )
         else:
@@ -1204,6 +1222,7 @@ def _make_tasks(
                 spin_ref_s0=spin_ref_s0,
                 spin_map=spin_map,
                 spin_reference=spin_reference,
+                spin_ref_style=spin_ref_style,
                 thermo_freq=thermo_freq,
                 dump_freq=dump_freq,
                 copies=copies,
