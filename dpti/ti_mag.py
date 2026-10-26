@@ -811,9 +811,19 @@ def post_tasks(
             ea -= ska
             enthalpy -= ska
 
-        # COM correction: 3/2 kBT per atom for translational DoF — energy integrands only.
-        # The 'p' integrand is Volume (must not receive an energy correction).
-        if path in ("t", "t-ginv"):
+        # COM correction: restore the 3 translational DoF that `fix recenter`/`fix
+        # momentum` remove, so <U> matches the unconstrained convention that
+        # einstein.frenkel() uses for the reference.  Energy integrands only: the 'p'
+        # integrand is Volume and must not receive an energy correction.
+        #
+        # GATED ON lattice_flag.  With `nve/spin lattice_flag 0` the lattice is frozen:
+        # there is no translation to restore, and the matching reference for such a run
+        # is the SPIN term alone (einstein.spin_ref_*), which carries no CM correction.
+        # Adding it unconditionally puts a term in the TI integrand that the HTI
+        # reference for the same constrained ensemble does not have, and the two routes
+        # then disagree by ~0.7 meV/atom over 200->600 K on a 128-atom cell.  For every
+        # ordinary (lattice_flag=1) run this changes nothing.
+        if path in ("t", "t-ginv") and int(jdata.get("lattice_flag", 1)):
             ea += 1.5 * pc.Boltzmann * tt / pc.electron_volt
 
         if path != "b":
